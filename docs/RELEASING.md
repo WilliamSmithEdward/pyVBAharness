@@ -27,19 +27,14 @@ At <https://pypi.org/manage/account/publishing/>, add:
 The first successful publish converts the pending publisher into a real
 project owned by your account.
 
-### 2. Do the same on TestPyPI
+### 2. Create the GitHub environment
 
-At <https://test.pypi.org/manage/account/publishing/>, add the same values
-with environment name `testpypi`. This enables the dry-run path.
+In the repository, under Settings > Environments, create `pypi`. The name
+must match the workflow exactly, because PyPI checks the environment claim
+in the OIDC token.
 
-### 3. Create the GitHub environments
-
-In the repository, under Settings > Environments, create `pypi` and
-`testpypi`. The names must match the workflow exactly, because PyPI checks
-the environment claim in the OIDC token.
-
-Adding required reviewers to the `pypi` environment is worth considering: it
-turns every publish into an explicit approval, which is a useful brake on an
+Adding required reviewers to that environment is worth considering: it turns
+every publish into an explicit approval, which is a useful brake on an
 accidental release.
 
 ## Cutting a release
@@ -74,15 +69,22 @@ accidental release.
    python benchmarks/run_pool_benchmarks.py --out benchmarks/output/pool-baseline-<version>.json
    ```
 
-4. Commit, then dry-run to TestPyPI: Actions > Publish > Run workflow, with
-   target `testpypi`. Verify the result installs from there:
+4. Commit, then dry-run the build: Actions > Publish > Run workflow. A
+   manual run stops after the build job without publishing anything, and
+   leaves the distributions as a downloadable artifact.
+
+   Download it and test the exact file that would be published, on a machine
+   that has Excel:
 
    ```powershell
-   python -m pip install --index-url https://test.pypi.org/simple/ `
-     --extra-index-url https://pypi.org/simple/ pyvbaharness
+   python -m venv .rc
+   .rc\Scripts\python -m pip install (Get-ChildItem dist\*.whl)
+   .rc\Scripts\pyvbaharness doctor --live
    ```
 
-   The extra index is needed because TestPyPI does not carry `pywin32`.
+   This is worth more than a staging index would be. The artifact is
+   byte-identical to what a release would upload, and it can be exercised
+   against real Excel, which no hosted index or runner can do.
 
 5. Tag and publish. Creating the GitHub release triggers the real publish:
 
@@ -101,8 +103,10 @@ package modules, that it does not ship the test suite, and that it imports
 and exposes the console entry point from a clean virtual environment.
 
 `publish.yml` runs the unit suite, checks the tag against the project
-version, builds, and uploads. The build job runs on Windows so the tests are
-meaningful; publishing runs on Linux because it only moves files.
+version, builds, verifies the wheel installs and imports, and uploads it.
+Only a published release goes on to the PyPI job; a manual run stops after
+the build, which is the dry-run path. The build job runs on Windows so the
+tests are meaningful; publishing runs on Linux because it only moves files.
 
 ## Limits worth knowing
 
