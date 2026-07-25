@@ -5,10 +5,14 @@ publishes a wheel whose reported __version__ disagrees with its filename.
 Benchmark baselines stamp __version__ into their JSON, so the drift would
 be recorded in results too. Cheap to check here, expensive to notice later.
 """
-import tomllib
 from pathlib import Path
 
 import pyvbaharness
+
+try:  # tomllib is 3.11+; the package supports 3.10, so fall back.
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - version dependent
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = ROOT / "pyproject.toml"
