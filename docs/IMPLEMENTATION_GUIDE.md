@@ -166,7 +166,31 @@ every value (`s:`, `i:`, `d:`, `b:`, `e:`) so cells always store literal
 text and round-trip exactly. If you add a batch argument type, extend both
 the encoder and the VBA `DecodeArg`, and add a round-trip live test.
 
-### 3.11 Excel is not a child of its COM client
+### 3.11 Excel's own prompts are not #32770 dialogs
+
+"Do you want to save your changes?" is a `NUIDialog`, not a classic
+`#32770`. Its controls are drawn inside a `NetUIHWND` surface: enumerating
+children yields `NetUIHWND`, `NetUICtrlNotifySink`, and `RICHEDIT60W`, all
+returning empty text, with no Win32 `Button` anywhere. The dismissal policy
+cannot read or click it, and the class-based watcher never saw it, so a run
+blocked this way degraded into a bare timeout.
+
+Detection now keys on modality rather than class: a titled `XLMAIN` window
+is disabled exactly while something modal owns Excel. Measured 2026-07-25:
+zero disabled samples across 15 scans of a CPU-pegged 3 s macro, against 26
+of 28 scans while a save prompt was up. The check requires four consecutive
+scans (one second) and stands down for two seconds after a successful
+dismissal, so a `#32770` the policy can actually handle is never
+misreported.
+
+Two traps when working here. Excel runs hidden, so its `XLMAIN` windows are
+invisible and any visible-only window enumeration filters away the very
+signal being looked for; `_enum_top_level` therefore returns all windows and
+callers filter per use. And these dialogs are still never dismissed: without
+readable buttons, clicking blind could save a workbook the caller never
+wanted saved.
+
+### 3.12 Excel is not a child of its COM client
 
 DCOM launches it, so killing the worker tree never reaps Excel. The harness
 records the PID (from `GetWindowThreadProcessId(app.Hwnd)`) plus its start

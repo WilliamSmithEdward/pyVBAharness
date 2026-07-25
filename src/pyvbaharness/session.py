@@ -326,9 +326,17 @@ class ExcelSession:
         if entry is None:
             return
         pid, _creation = entry
+        if not is_process_alive(pid):
+            # Already gone, possibly killed from outside this session. Record
+            # it so the trace shows the instance was accounted for; without
+            # this the oracle reports a missing-cleanup violation for a
+            # session that did nothing wrong.
+            self._note_excel_gone("already-exited")
+            return
         deadline = time.monotonic() + self.config.cleanup_grace_s
         while time.monotonic() < deadline:
             if not is_process_alive(pid):
+                self._note_excel_gone("exited-during-cleanup")
                 return
             time.sleep(0.2)
         if self._manifest.kill_role("excel"):
@@ -339,6 +347,23 @@ class ExcelSession:
                 "killed": True,
                 "at": time.time(),
             })
+
+    def _note_excel_gone(self, reason: str) -> None:
+        """Record that the owned Excel is no longer running, if the trace
+        does not already say so."""
+        for event in reversed(self.events):
+            kind = event.get("kind")
+            if kind in (protocol.EV_EXCEL_KILLED, protocol.EV_EXCEL_QUIT):
+                return
+            if kind == protocol.EV_EXCEL_CREATED:
+                break
+        self.events.append({
+            "kind": protocol.EV_EXCEL_KILLED,
+            "session": self.session_id,
+            "reason": reason,
+            "killed": False,
+            "at": time.time(),
+        })
 
     def _drain_until_exit(self, deadline: float) -> bool:
         while True:

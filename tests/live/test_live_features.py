@@ -3,18 +3,28 @@ liveness timeouts, coverage, reset, screenshots, export/import, fuzzing.
 
 Run with:  python -m pytest tests/live -m live -o addopts="" -v
 """
+import subprocess
 import time
+import warnings
 from pathlib import Path
 
 import pytest
 
 from pyvbaharness import (
+    MODAL_BLOCKED,
     PASSED,
     TIMEOUT,
     VBA_ERROR,
     ExcelSession,
     HarnessConfig,
 )
+from pyvbaharness.process_control import is_process_alive
+
+BASIC_SOURCE = """
+Public Sub Main()
+    PyVbaLog "ok"
+End Sub
+"""
 
 pytestmark = pytest.mark.live
 
@@ -302,6 +312,105 @@ End Sub
             image = Path(result.screenshot)
             assert image.exists() and image.stat().st_size > 1000
             assert image.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+class TestExcelSurfacePrompts:
+    """Excel's own prompts, which are not Win32 #32770 dialogs.
+
+    Modern Excel raises "save your changes?" as a NUIDialog whose controls
+    live inside a NetUIHWND surface: no Win32 buttons to enumerate, nothing
+    for the dismissal policy to click. Detection therefore keys on a titled
+    XLMAIN window being disabled, which is what modality does regardless of
+    the dialog's class.
+    """
+
+    def test_save_prompt_reports_modal_blocked(self):
+        config = HarnessConfig(exclusive=False, auto_recycle=True,
+                               default_timeout_s=45.0)
+        with ExcelSession(config) as session:
+            session.new_workbook()
+            started = time.monotonic()
+            result = session.run_vba("""
+Public Sub Main()
+    Dim wb As Workbook
+    Set wb = Application.Workbooks.Add
+    wb.Worksheets(1).Range("A1").Value = "dirty"
+    Application.DisplayAlerts = True
+    wb.Close
+End Sub
+""", proc="Main", timeout=40.0)
+            elapsed = time.monotonic() - started
+            # Without detection this is a bare 40 s timeout.
+            assert result.outcome == MODAL_BLOCKED
+            assert elapsed < 20.0
+            assert any("NUIDialog" in " ".join(d.texts)
+                       for d in result.dialogs)
+            # The session recovers for the next caller.
+            assert session.run_vba(BASIC_SOURCE, proc="Main").outcome == PASSED
+
+    def test_busy_macro_is_not_mistaken_for_a_modal(self, session):
+        """The modal signal must not fire on a CPU-bound macro."""
+        result = session.run_vba("""
+Public Sub Busy()
+    Dim started As Single
+    started = Timer
+    Do While Timer - started < 4!
+    Loop
+    PyVbaLog "finished"
+End Sub
+""", proc="Busy", timeout=30.0)
+        assert result.outcome == PASSED
+        assert result.output == ["finished"]
+
+    def test_external_links_do_not_prompt(self, session, tmp_path):
+        linked = tmp_path / "linked.xlsm"
+        session.new_workbook()
+        session.run_vba(r"""
+Public Sub Main()
+    ThisWorkbook.Worksheets(1).Range("A1").Formula = _
+        "='C:\pyvba_missing\[ghost.xlsx]Sheet1'!A1"
+End Sub
+""", proc="Main")
+        session.save_as(linked)
+
+        session.open_workbook(linked, read_only=True, timeout=30.0)
+        result = session.run_vba("""
+Public Function V() As String
+    V = ThisWorkbook.Worksheets(1).Range("A1").Text
+End Function
+""", proc="V", module_name="LinkProbe")
+        assert result.outcome == PASSED
+
+    def test_restart_is_clean_after_a_hard_kill(self):
+        """Killing Excel with unsaved data must not leave recovery state
+        that blocks the next session."""
+        config = HarnessConfig(exclusive=False, auto_recycle=False)
+        for _ in range(2):
+            session = ExcelSession(config)
+            pid = session.excel_pid
+            try:
+                session.new_workbook()
+                session.write_range("Sheet1", "A1", [["unsaved"]])
+                subprocess.run(["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, check=False)
+                deadline = time.monotonic() + 10.0
+                while time.monotonic() < deadline and is_process_alive(pid):
+                    time.sleep(0.2)
+                assert not is_process_alive(pid)
+            finally:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    session.close()
+
+            with ExcelSession(config) as fresh:
+                result = fresh.run_vba("""
+Public Function N() As Long
+    N = 7
+End Function
+""", proc="N", timeout=45.0)
+                assert result.outcome == PASSED
+                assert result.value == 7
+                assert fresh.oracle_issues == []
 
 
 class TestExcelProvenance:

@@ -43,6 +43,23 @@ _BM_CLICK = 0x00F5
 _SMTO_ABORTIFHUNG = 0x0002
 _VBE_WINDOW_CLASS = "wndclass_desked_gsk"
 _DIALOG_CLASS = "#32770"
+_EXCEL_MAIN_CLASS = "XLMAIN"
+
+# Office dialogs that are NOT classic Win32 #32770 windows. Modern Excel
+# raises "Do you want to save your changes?" as a NUIDialog whose controls
+# are drawn inside a NetUIHWND surface: there are no Win32 Button children
+# to enumerate or click, and GetWindowText returns nothing for any of them.
+# They can be detected and reported, but not read or dismissed.
+_OPAQUE_DIALOG_CLASSES = ("NUIDialog", "bosa_sdm_XL9", "MsoDialog")
+
+# A titled XLMAIN window is disabled exactly while something modal owns
+# Excel, whatever class that something is. Measured 2026-07-25: zero
+# disabled samples across 15 scans of a CPU-pegged 3 s macro, against 26 of
+# 28 scans while a save prompt was up. Held for this many consecutive scans
+# (250 ms each) before reporting, which leaves the dismissal path time to
+# clear a #32770 it can actually handle.
+_MODAL_CONFIRM_SCANS = 4
+_DISMISS_SETTLE_S = 2.0
 
 
 @dataclass
@@ -85,10 +102,16 @@ def _click_button(hwnd: int) -> bool:
 
 
 def _enum_top_level(pid: int) -> list[int]:
+    """Every top-level window of the process, visible or not.
+
+    Visibility is filtered per use, not here: the harness runs Excel hidden,
+    so its XLMAIN windows are invisible, and a visible-only enumeration
+    would hide the disabled-window signal that reveals a modal dialog.
+    """
     handles: list[int] = []
 
     def callback(hwnd: int, _lparam: int) -> bool:
-        if _user32.IsWindowVisible(hwnd) and _window_pid(hwnd) == pid:
+        if _window_pid(hwnd) == pid:
             handles.append(hwnd)
         return True
 
@@ -141,6 +164,9 @@ class DialogWatcher:
         self._suppress_vbe = threading.Event()
         self._compile_mode = threading.Event()
         self._vbe_reported = False
+        self._modal_scans = 0
+        self._modal_reported = False
+        self._last_dismiss_at = 0.0
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name="pyvba-dialog-watcher")
 
@@ -199,12 +225,73 @@ class DialogWatcher:
             self._stop.wait(self.interval_s)
 
     def _scan(self) -> None:
+        opaque: list[tuple[int, str]] = []
+        main_disabled = False
         for hwnd in _enum_top_level(self.pid):
             class_name = _window_class(hwnd)
+            if class_name == _EXCEL_MAIN_CLASS:
+                # Checked whether or not it is visible: the harness hides
+                # Excel, and a disabled document window is what modality
+                # looks like from outside.
+                if (_window_text(hwnd)
+                        and not _user32.IsWindowEnabled(hwnd)):
+                    main_disabled = True
+                continue
+            if not _user32.IsWindowVisible(hwnd):
+                continue
             if class_name == _DIALOG_CLASS:
                 self._handle_dialog(hwnd)
             elif class_name == _VBE_WINDOW_CLASS:
                 self._handle_vbe_window(hwnd)
+            elif class_name in _OPAQUE_DIALOG_CLASSES:
+                opaque.append((hwnd, class_name))
+        self._check_opaque_modal(main_disabled, opaque)
+
+    def _check_opaque_modal(self, main_disabled: bool,
+                            opaque: list[tuple[int, str]]) -> None:
+        """Report a modal this watcher can see but cannot classify.
+
+        Excel's own prompts (save changes, and other NetUI dialogs) carry no
+        Win32 buttons, so the dismissal policy cannot act on them. Without
+        this check they are invisible to the harness and the run degrades
+        into a bare timeout, which sends the reader hunting for an infinite
+        loop that does not exist. Detecting them turns that into
+        modal-blocked plus a screenshot.
+        """
+        if self._compile_mode.is_set():
+            return  # compile checks legitimately raise dialogs of their own
+        if not main_disabled:
+            self._modal_scans = 0
+            self._modal_reported = False
+            return
+        if time.time() - self._last_dismiss_at < _DISMISS_SETTLE_S:
+            return  # a dismissible dialog is being handled; give it time
+        self._modal_scans += 1
+        if self._modal_scans < _MODAL_CONFIRM_SCANS or self._modal_reported:
+            return
+        self._modal_reported = True
+        classes = sorted({name for _hwnd, name in opaque})
+        detail = (f"An Excel dialog of class {', '.join(classes)} is blocking "
+                  "the run." if classes else
+                  "Excel is blocked by a modal window.")
+        capture = DialogCapture(
+            title="Excel modal dialog",
+            texts=[detail,
+                   "Its controls are not Win32 buttons, so the harness "
+                   "cannot read or dismiss it safely."])
+        record = WatcherRecord(
+            at=time.time(), kind="opaque-modal", capture=capture,
+            handle=opaque[0][0] if opaque else 0,
+            action="blocked:opaque-modal-dialog",
+            extra={"window_classes": classes})
+        self._attach_screenshot(record, record.handle or self._main_window())
+        self._emit(record)
+
+    def _main_window(self) -> int:
+        for hwnd in _enum_top_level(self.pid):
+            if _window_class(hwnd) == _EXCEL_MAIN_CLASS and _window_text(hwnd):
+                return hwnd
+        return 0
 
     def _handle_dialog(self, hwnd: int) -> None:
         capture = _capture_dialog(hwnd)
@@ -230,6 +317,9 @@ class DialogWatcher:
             clicked = handle and _click_button(handle)
             if clicked:
                 record.action = f"click:{decision.button.text or 'OK'}"
+                # Suppresses the generic modal check while Excel's main
+                # window returns to the enabled state.
+                self._last_dismiss_at = time.time()
             else:
                 record.action = "blocked:low-level-dismiss-failed"
         else:

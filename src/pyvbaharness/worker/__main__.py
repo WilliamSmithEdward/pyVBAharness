@@ -118,6 +118,8 @@ def _record_payload(record: WatcherRecord) -> dict[str, Any]:
 def _on_watcher_record(record: WatcherRecord) -> None:
     if record.kind == "vbe-window":
         _emit(protocol.EV_VBE_WINDOW, _record_payload(record))
+    elif record.kind == "opaque-modal":
+        _emit(protocol.EV_MODAL_BLOCKED, _record_payload(record))
     elif record.action.startswith("blocked:"):
         _emit(protocol.EV_MODAL_BLOCKED, _record_payload(record))
     elif record.action.startswith("click:"):

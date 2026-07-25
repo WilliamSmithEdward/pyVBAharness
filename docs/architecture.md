@@ -215,6 +215,19 @@ the dialog, and the watcher's records are swept once more before an accept
 is reported so a rejection can never be outrun. The watch window remains as
 the fallback when neither signal appears.
 
+### Excel's own prompts are not #32770 dialogs
+
+"Do you want to save your changes?" is a `NUIDialog` with its controls drawn
+inside a `NetUIHWND` surface: no Win32 buttons, no readable text. The
+class-based watcher never saw it, so a run blocked that way reported a bare
+timeout. Detection now keys on modality instead of class, because a titled
+`XLMAIN` window is disabled exactly while something modal owns Excel
+(measured: zero disabled samples in 15 scans of a CPU-pegged macro, 26 of 28
+while a save prompt was up). Excel runs hidden, so window enumeration cannot
+filter on visibility or it discards the signal. These dialogs are reported
+and screenshotted, never dismissed, since clicking blind could save a
+workbook the caller never wanted saved.
+
 ### Modifying the VBProject resets VBA module-level state
 
 Adding or replacing any module clears every module-level variable in the
@@ -385,7 +398,7 @@ src/pyvbaharness/
   worker/excel_host.py  all Excel COM calls
   worker/watcher.py   ctypes window scanner + dismissal executor
 tests/unit            pure logic, no Excel required (147 tests)
-tests/live            real Excel, opt-in via -m live (54 tests)
+tests/live            real Excel, opt-in via -m live (58 tests)
 benchmarks/           per-run, batch, and pool scaling measurements
 ```
 

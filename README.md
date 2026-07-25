@@ -371,10 +371,27 @@ flight and applies a deliberately narrow policy:
 | Informational (OK, or OK and Help only) | Dismissed with OK |
 | Anything with a real choice (Yes/No, Cancel, Retry, Debug, Save) | Reported as `modal-blocked`; Excel terminated |
 | Compile error, outside a compile check | Reported as `modal-blocked`; Excel terminated |
+| Excel's own prompts, such as "save your changes?" | Reported as `modal-blocked`; Excel terminated |
+
+Excel's own prompts are not classic Win32 dialogs. "Do you want to save your
+changes?" is a `NUIDialog` whose controls are drawn inside a NetUI surface,
+with no Win32 buttons to enumerate or click, so its text cannot be read and
+it is never dismissed. It is detected by modality instead: a titled Excel
+window is disabled for as long as something modal owns the application,
+whatever class that something is. The result is `modal-blocked` rather than
+a bare timeout.
+
+Prompts of this kind are suppressed in the first place by `DisplayAlerts`,
+`AskToUpdateLinks`, `UpdateLinks:=0`, `IgnoreReadOnlyRecommended`, and
+closing without saving. Detection covers the case where VBA under test turns
+suppression back on. Alert suppression is re-asserted before the harness
+closes, saves, or quits, so user code cannot leave a prompt waiting for the
+teardown path.
 
 `result.dialogs` records what appeared and what was done about it. On a
 blocked dialog or a timeout, a screenshot of the Excel window is captured
-where possible and referenced from the result.
+where possible and referenced from the result, which is the practical way to
+see an Excel prompt whose text cannot be read.
 
 ## Process ownership
 
@@ -421,7 +438,7 @@ dispatcher, which accounts for the 97 ms figure.
 
 ```bash
 python -m pytest tests/unit                          # 147 tests, no Excel
-python -m pytest tests/live -m live -o addopts=""    # 54 tests, real Excel
+python -m pytest tests/live -m live -o addopts=""    # 58 tests, real Excel
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
 ```

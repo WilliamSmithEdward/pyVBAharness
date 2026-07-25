@@ -199,9 +199,24 @@ class ExcelHost:
         ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
 
+    def _resuppress_alerts(self) -> None:
+        """Re-assert alert suppression before a harness-initiated operation.
+
+        User VBA can set Application.DisplayAlerts = True and leave it that
+        way, which would let a later harness Close or SaveAs raise a prompt
+        that nothing can dismiss (Excel's own prompts carry no Win32
+        buttons). Cheap insurance on the infrequent operations that can
+        prompt; the hot run path does not pay for it.
+        """
+        try:
+            self.app.DisplayAlerts = False
+        except com_error:
+            pass
+
     @_wrap_com("close workbook")
     def close_workbook(self) -> None:
         if self.workbook is not None:
+            self._resuppress_alerts()
             self.workbook.Close(False)
             self.workbook = None
             self._reset_injection_state()
@@ -209,6 +224,7 @@ class ExcelHost:
     @_wrap_com("quit Excel")
     def quit(self) -> None:
         if self.app is not None:
+            self._resuppress_alerts()
             self.app.Quit()
 
     def release(self) -> None:
@@ -268,6 +284,7 @@ class ExcelHost:
             raise HostError(
                 f"save_as supports .xlsm and .xlsb, not {suffix or path!r}: "
                 "other formats silently drop VBA under suppressed alerts.")
+        self._resuppress_alerts()
         self.workbook.SaveAs(path, file_format)
         return {"path": str(self.workbook.FullName)}
 

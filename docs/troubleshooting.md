@@ -90,6 +90,10 @@ Common causes:
   its output comes back in `result.output`.
 - Code that saves, closes, or opens workbooks and hits a confirmation.
 - A compile error in the project. Run `compile_project()` to see the text.
+- VBA setting `Application.DisplayAlerts = True` and then doing something
+  that prompts. Excel's own prompts carry no readable text, so
+  `result.dialogs` will say only that a `NUIDialog` blocked the run; the
+  screenshot referenced from the result shows which prompt it was.
 
 ## A run reports `runner-error`
 
