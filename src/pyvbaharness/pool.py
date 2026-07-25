@@ -109,6 +109,16 @@ class SessionPool:
             source, proc=proc, args=args, timeout=timeout,
             line_numbers=line_numbers))
 
+    def map_vba(self, source: str, proc: str,
+                args_list: list[tuple],
+                timeout: float | None = None) -> list[RunResult]:
+        """Run one procedure across many argument tuples in parallel;
+        results return in args_list order."""
+        futures = [self.run_vba(source, proc=proc, args=args,
+                                timeout=timeout)
+                   for args in args_list]
+        return [future.result() for future in futures]
+
     def run_tests(self, source: str, module: str = "PyVbaTests",
                   prefix: str = "Test",
                   timeout: float | None = None) -> list[TestCaseResult]:

@@ -30,12 +30,60 @@ _DECL_RE = re.compile(
 
 
 @dataclass
+class Parameter:
+    """One declared parameter: name, VBA type, and passing style."""
+
+    name: str
+    type_name: str = "Variant"
+    optional: bool = False
+    param_array: bool = False
+    by_val: bool = False
+    is_array: bool = False
+
+
+_PARAM_RE = re.compile(
+    # The whitespace before the array marker lives INSIDE the optional
+    # group: a bare "[ \t]*" there would consume the space that the
+    # "[ \t]+As" clause needs and silently drop every type annotation.
+    r"^(?:Optional[ \t]+)?(?:ByVal[ \t]+|ByRef[ \t]+)?"
+    r"(?:ParamArray[ \t]+)?"
+    r"(?P<name>[A-Za-z]\w*)(?P<array>[ \t]*\(\))?"
+    r"(?:[ \t]+As[ \t]+(?P<type>[A-Za-z][\w.]*))?",
+    re.IGNORECASE,
+)
+
+
+def parse_parameter(text: str) -> Parameter:
+    head = text.strip()
+    lowered = head.lower()
+    parameter = Parameter(
+        name="",
+        optional=lowered.startswith("optional"),
+        param_array=lowered.startswith("paramarray")
+        or " paramarray " in f" {lowered} ",
+        by_val="byval" in lowered.split("=")[0],
+    )
+    match = _PARAM_RE.match(head)
+    if match:
+        parameter.name = match.group("name")
+        parameter.is_array = match.group("array") is not None
+        if match.group("type"):
+            parameter.type_name = match.group("type")
+    return parameter
+
+
+@dataclass
 class ProcedureSignature:
     name: str
     kind: str
     required: int
     optional: int
     has_param_array: bool
+    params: list[Parameter] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.params is None:
+            self.params = []
 
     @property
     def returns_value(self) -> bool:
@@ -147,17 +195,20 @@ def parse_declaration(line: str) -> ProcedureSignature | None:
     params_text = _param_list(match.group("rest"))
     required = optional = 0
     has_param_array = False
-    for param in split_top_level(params_text or ""):
-        head = param.lower()
-        if head.startswith("paramarray"):
+    params: list[Parameter] = []
+    for param_text in split_top_level(params_text or ""):
+        parameter = parse_parameter(param_text)
+        params.append(parameter)
+        if parameter.param_array:
             has_param_array = True
-        elif head.startswith("optional"):
+        elif parameter.optional:
             optional += 1
         else:
             required += 1
     return ProcedureSignature(name=match.group("name"), kind=kind,
                               required=required, optional=optional,
-                              has_param_array=has_param_array)
+                              has_param_array=has_param_array,
+                              params=params)
 
 
 def find_procedure(source: str, name: str) -> ProcedureSignature | None:

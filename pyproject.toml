@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyvbaharness"
-version = "0.3.0"
+version = "0.4.0"
 description = "Hang-resistant Python harness for running and validating VBA in desktop Excel"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,9 +15,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fuzz = [
+    "hypothesis>=6",
+]
 dev = [
     "pytest>=8",
+    "hypothesis>=6",
 ]
+
+[project.entry-points.pytest11]
+pyvbaharness = "pyvbaharness.pytest_plugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -28,3 +35,6 @@ markers = [
     "live: requires a real desktop Excel installation (deselected by default)",
 ]
 addopts = "-m 'not live'"
+# This repo's own suite tests the plugin through pytester; collecting .bas
+# fixtures at the top level would need Excel for a unit run.
+vba_collect = false

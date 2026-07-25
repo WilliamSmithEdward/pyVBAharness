@@ -2,6 +2,26 @@
 
 These instructions apply to the entire repository.
 
+## Read this first
+
+**Before editing anything under `src/pyvbaharness/`, read
+[docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md).**
+
+It is the how-to for this codebase: the catalog of measured Excel
+behaviors that shaped the design (each one cost real debugging time and is
+guarded by a live test), the invariants that must not break, a worked
+recipe for adding a capability end to end, the rules for changing generated
+VBA safely, the debugging playbook, and the definition of done.
+
+Working from the source alone will look reasonable and reintroduce bugs
+that are already fixed. The most common trap: modifying the VBProject
+resets all VBA module-level state, so anything pushed into the support
+module must be re-pushed before the next run.
+
+Supporting documents: [docs/architecture.md](docs/architecture.md) for what
+the design is and why, [docs/troubleshooting.md](docs/troubleshooting.md)
+for what failures mean to users.
+
 ## Governing models
 
 Use the Recursive Invariant Discovery Model (RIDM) 11.0 as the operating
@@ -26,9 +46,11 @@ order.
 - Live tests (real Excel): `python -m pytest tests/live -m live -o addopts=""`
 - Benchmarks: `python benchmarks/run_benchmarks.py --out benchmarks/output/<name>.json`
 - Pool scaling: `python benchmarks/run_pool_benchmarks.py --out benchmarks/output/<name>.json`
+- How to change this codebase: `docs/IMPLEMENTATION_GUIDE.md` (read first).
 - Architecture and the measured Excel behaviors behind each decision:
   `docs/architecture.md`.
-- Excel's "Trust access to the VBA project object model" must be enabled.
+- Excel's "Trust access to the VBA project object model" must be enabled;
+  `python -m pyvbaharness doctor --live` verifies the whole environment.
 
 ## Invariants
 
@@ -48,9 +70,13 @@ change:
   the VBA under test. Only `passed` and `vba-error` describe the code.
 - VBA errors are captured inside VBA by a directly-called dispatcher. Do not
   route runs through `Application.Run` from inside VBA: error trapping breaks.
-- Error lines come from per-procedure Erl instrumentation (numbering.py).
-  `Erl` is per-procedure error context; reading it only in the dispatcher
-  returns 0, so the injected in-procedure handlers are load-bearing.
+- Error lines and stacks come from per-procedure Erl instrumentation
+  (numbering.py). `Erl` is per-procedure error context; reading it only in
+  the dispatcher returns 0, so the injected in-procedure handlers are
+  load-bearing. Instrumentation must preserve the original line count.
+- Anything pushed into VBA module-level state (progress path, coverage
+  arrays) must be re-pushed after any VBProject change; see
+  `_ensure_progress_path` and `_ensure_coverage`.
 - Dialogs offering a real choice are never dismissed by guessing.
 - All COM lives in the worker process; the supervisor and the dialog watcher
   stay COM-free.
@@ -68,13 +94,15 @@ regression in safety behavior fails loudly.
 ## Working on Excel behavior
 
 Excel's automation surface has sharp edges that are not documented anywhere
-useful. When one is suspected:
+useful. The known ones are cataloged in section 3 of the implementation
+guide; read it before concluding you have found something new. When a new
+one is suspected, follow the playbook in section 8:
 
 1. Reproduce it in a standalone probe before changing harness code.
 2. Bisect until the trigger is isolated, rather than fixing by hypothesis.
 3. Use `PYVBAHARNESS_STACK_DUMP_S` to locate a wedge instead of guessing.
 4. Record the measurement (numbers, date, Excel build) in a code comment at
-   the workaround and in `docs/architecture.md`.
+   the workaround, in the guide's catalog, and in `docs/architecture.md`.
 5. Add a live test that fails without the workaround.
 
 Do not treat a passing run as proof that a workaround is unnecessary; several

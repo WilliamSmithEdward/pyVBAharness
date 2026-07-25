@@ -14,6 +14,7 @@ import faulthandler
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 from typing import Any
@@ -22,6 +23,68 @@ from .. import codegen, protocol
 from ..results import PASSED, RUNNER_ERROR, VBA_ERROR
 from .excel_host import ExcelHost, HostError
 from .watcher import DialogWatcher, WatcherRecord
+
+
+class ProgressTail(threading.Thread):
+    """Tails the VBA progress file and emits vba-progress events.
+
+    VBA cannot call back into Python mid-run (the COM thread is blocked in
+    Application.Run), so PyVbaProgress appends lines to a file and this
+    thread converts them into events. VBA's Print # writes in the ANSI code
+    page, hence the mbcs decode; brief sharing violations while VBA holds
+    the file open are ridden out by simply retrying next tick.
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__(daemon=True, name="pyvba-progress-tail")
+        self.path = path
+        self._offset = 0
+        self._stop = threading.Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def drain_now(self) -> None:
+        """Flush pending progress lines immediately.
+
+        Called just before a command result is emitted: the poll interval
+        would otherwise drop the last heartbeat, because the supervisor
+        stops reading progress once command-finished arrives.
+        """
+        try:
+            self._drain()
+        except OSError:
+            pass
+
+    def run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._drain()
+            except OSError:
+                pass
+            self._stop.wait(0.2)
+
+    def _drain(self) -> None:
+        if not os.path.exists(self.path):
+            return
+        with open(self.path, "rb") as handle:
+            handle.seek(self._offset)
+            chunk = handle.read()
+        if not chunk:
+            return
+        self._offset += len(chunk)
+        for raw in chunk.decode("mbcs", "replace").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            fraction_text, _sep, message = raw.partition("|")
+            try:
+                fraction = float(fraction_text)
+            except ValueError:
+                fraction = 0.0
+                message = raw
+            _emit(protocol.EV_PROGRESS,
+                  {"fraction": fraction, "message": message})
 
 _emit_lock = threading.Lock()
 _session_id = "unknown"
@@ -64,23 +127,36 @@ def _on_watcher_record(record: WatcherRecord) -> None:
 
 
 class Worker:
-    def __init__(self) -> None:
+    def __init__(self, artifacts_dir: str = "") -> None:
         self.host = ExcelHost()
         self.watcher: DialogWatcher | None = None
+        self.progress_tail: ProgressTail | None = None
+        self.artifacts_dir = artifacts_dir
 
     # ----- startup / shutdown ---------------------------------------------
 
     def start(self) -> None:
+        self.host.progress_path = os.path.join(
+            tempfile.gettempdir(), f"pyvba-progress-{os.getpid()}.log")
         info = self.host.create()
         _emit(protocol.EV_EXCEL_CREATED, info)
-        self.watcher = DialogWatcher(self.host.pid, _on_watcher_record)
+        self.watcher = DialogWatcher(self.host.pid, _on_watcher_record,
+                                     artifacts_dir=self.artifacts_dir)
         self.watcher.start()
+        self.progress_tail = ProgressTail(self.host.progress_path)
+        self.progress_tail.start()
         _emit(protocol.EV_READY, {"pid": self.host.pid})
 
     def shutdown(self) -> None:
         watcher = self.watcher
         if watcher is not None:
             watcher.stop()
+        if self.progress_tail is not None:
+            self.progress_tail.stop()
+        try:
+            os.remove(self.host.progress_path)
+        except OSError:
+            pass
         started = time.time()
         try:
             had_workbook = self.host.workbook is not None
@@ -121,6 +197,12 @@ class Worker:
             })
         except (ValueError, KeyError, TypeError) as err:
             return self._finish(RUNNER_ERROR, mark, {"message": str(err)})
+        finally:
+            # Emit trailing progress lines BEFORE the result: the
+            # supervisor stops consuming progress once command-finished
+            # arrives, so the poll interval would drop the last heartbeat.
+            if self.progress_tail is not None:
+                self.progress_tail.drain_now()
         if name == protocol.CMD_RUN:
             return self._finish_run(data, mark)
         return self._finish(PASSED, mark, {"data": data})
@@ -154,6 +236,7 @@ class Worker:
                 "source": parsed.get("source", ""),
                 "description": parsed.get("description", ""),
                 "line": parsed.get("line", 0),
+                "stack": parsed.get("stack", []),
                 "output": parsed.get("output", []),
             })
         return self._finish(RUNNER_ERROR, mark, {
@@ -186,6 +269,33 @@ class Worker:
             value = host.run_raw(str(params["target"]),
                                  list(params.get("args", [])))
             return {"value": value}
+        if name == protocol.CMD_RUN_BATCH:
+            raw = host.run_batch(list(params.get("calls", [])))
+            try:
+                items = json.loads(raw)
+            except (TypeError, ValueError) as err:
+                raise HostError(
+                    "The batch dispatcher returned an unreadable result: "
+                    + repr(raw)[:300]) from err
+            if not isinstance(items, list):
+                raise HostError("The batch dispatcher returned a non-list.")
+            return {"results": items}
+        if name == protocol.CMD_RESET_SHEETS:
+            return host.reset_sheets()
+        if name == protocol.CMD_EXPORT_MODULES:
+            return host.export_modules(str(params["dir"]))
+        if name == protocol.CMD_COV_INIT:
+            host.coverage_init(int(params["modules"]),
+                               int(params["max_line"]))
+            return {"initialized": True}
+        if name == protocol.CMD_COV_REPORT:
+            raw = host.coverage_report()
+            try:
+                hits = json.loads(raw)
+            except (TypeError, ValueError) as err:
+                raise HostError("Unreadable coverage report: "
+                                + repr(raw)[:300]) from err
+            return {"hits": hits}
         if name == protocol.CMD_READ_RANGE:
             return {"data": host.read_range(str(params["sheet"]),
                                             str(params["ref"]))}
@@ -265,6 +375,7 @@ def main() -> int:
     global _session_id
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="unknown")
+    parser.add_argument("--artifacts", default="")
     args = parser.parse_args()
     _session_id = args.session
 
@@ -288,7 +399,7 @@ def main() -> int:
         except (ValueError, RuntimeError):
             pass
 
-    worker = Worker()
+    worker = Worker(artifacts_dir=args.artifacts)
     try:
         worker.start()
     except Exception as err:  # noqa: BLE001 - fatal startup must be reported

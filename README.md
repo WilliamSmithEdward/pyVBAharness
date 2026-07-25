@@ -113,11 +113,66 @@ result.error.number      # 513
 result.error.source      # 'MyModule'
 result.error.description # 'something went wrong'
 result.error.line        # 5 (the Err.Raise line in the source above)
+result.error.stack       # [('PyVbaUserCode.Main', 5)]
 ```
 
-Pass ``line_numbers=False`` to inject the source verbatim; ``error.line`` is
-then None. The instrumentation skips sources that already carry numeric
-labels, and a user ``On Error`` statement overrides it from that point on.
+For a nested failure, `error.stack` is a real VBA stack trace, deepest
+frame first, each with its own line:
+
+```python
+[('Helpers.Parse', 12), ('Model.Load', 40), ('Main.Run', 7)]
+```
+
+Pass `line_numbers=False` to inject the source verbatim; `error.line` and
+`error.stack` are then empty. The instrumentation skips sources that already
+carry numeric labels, and a user `On Error` statement overrides it from that
+point on.
+
+### Run many calls in one round trip
+
+```python
+results = excel.run_batch([
+    ("Model.Score", (row, weight)) for row, weight in inputs
+])
+```
+
+Each result has the same fidelity as `run_macro` (value, output, error with
+line and stack), but the per-call COM round trip is paid once for the whole
+batch. Measured: 2.7x faster at 50 calls, 4.7x at 200, 9.9x at 3000, where
+per-call cost falls to 0.066 ms. Arguments must be scalars.
+
+### Keep long runs alive by liveness, not guesswork
+
+A 20-minute recalculation should not need a 25-minute timeout guess. Report
+progress from VBA and set an idle timeout: the run is killed only after it
+goes *silent*, not on a wall clock.
+
+```python
+result = excel.run_vba(source, proc="Recalculate",
+                       idle_timeout=60,
+                       on_progress=lambda pct, msg: print(pct, msg))
+```
+
+```vba
+Public Sub Recalculate()
+    For i = 1 To 10000
+        ' ... work ...
+        PyVbaProgress i / 10000, "row " & i
+    Next i
+End Sub
+```
+
+### Measure VBA line coverage
+
+```python
+excel.add_module("Model", source, coverage=True)
+excel.run_tests(test_source)
+report = excel.coverage_report()
+print(report.percent)                      # 87.5
+print(report.modules["model"].missed)      # [42, 43, 51]
+```
+
+Coverage is opt-in per module; hits accumulate across runs.
 
 ### Evaluate an expression
 
@@ -151,6 +206,33 @@ is reinjected, and the remaining tests still run; a hang costs one test, not
 the suite. (Only when recovery is impossible, for example `auto_recycle`
 disabled, is the remainder reported as not run rather than silently
 dropped.)
+
+### Run VBA tests through pytest
+
+Name a file `test_*.bas` and every zero-argument `Test*` procedure in it
+becomes a pytest item:
+
+```bash
+pytest tests/vba/            # collects test_model.bas
+pytest -k Discount -v        # pytest selection works
+pytest --junitxml=out.xml    # CI dashboards work
+```
+
+Failures report the assertion message, error line, VBA stack, and any
+`PyVbaLog` output. One shared auto-recycling session serves the run; under
+pytest-xdist each worker gets its own.
+
+### Fuzz a VBA function
+
+```python
+from pyvbaharness.properties import check_vba_function
+
+check_vba_function(excel, source, "Discount",
+                   check=lambda args, value: 0 <= value <= args[0])
+```
+
+Strategies come from the parsed VBA signature, and Hypothesis shrinks any
+failure to a minimal counterexample. Needs `pip install pyvbaharness[fuzz]`.
 
 ### Survive a hang
 
@@ -321,20 +403,27 @@ python benchmarks/run_benchmarks.py
 
 Measured on Excel 365 x64, Python 3.14 (`benchmarks/output/baseline-0.2.0.json`):
 
+Measured on Excel 365 x64, Python 3.14
+(`benchmarks/output/baseline-0.4.0.json`):
+
 | Operation | Median |
 | --- | --- |
 | Session startup and teardown (new Excel process) | 0.5 s warm, ~3 s cold |
-| Run a procedure, same target as last time | 15 ms |
-| Repeat `run_vba` with identical source (injection cache) | 20 ms |
-| Run a procedure, different target | 76 ms |
-| Compile check, clean project | 1.0 s |
-| Write 10,000 cells | 67 ms |
-| Read 10,000 cells | 9 ms |
+| Run a procedure, same target as last time | 0.6 ms |
+| Run a procedure with arguments | 1.4 ms |
+| Repeat `run_vba` with identical source (injection cache) | 1.9 ms |
+| Run a procedure, different target (dispatcher regenerated) | 97 ms |
+| Batched calls, 1000 at a time | 0.107 ms each |
+| Compile check, clean project | 1.2 s |
+| Write 10,000 cells | 71 ms |
+| Read 10,000 cells | 10 ms |
 
-Keeping one session open across many runs is what makes this fast: each
-`run_vba(...)` in a loop costs milliseconds, while a fresh session per run
-costs seconds. Identical source is never reinjected, so calling `run_vba`
-in a loop is as cheap as `run_macro`.
+Keeping one session open is what makes this fast: a fresh session per run
+costs seconds, a warm run costs well under a millisecond. Three caches do
+the work (target signatures, injected source, and the generated
+dispatcher), so a loop over `run_vba` with unchanged source stays on the
+fast path. When the calls themselves are tiny, `run_batch` removes the
+remaining per-call round trip.
 
 ## Documentation
 
@@ -342,6 +431,9 @@ in a loop is as cheap as `run_macro`.
   layers, and the design decisions behind them
 - [Troubleshooting](docs/troubleshooting.md): what each failure means and
   what to do about it
+- [Implementation guide](docs/IMPLEMENTATION_GUIDE.md): how to change this
+  codebase, including the catalog of measured Excel behaviors it works
+  around
 
 ## License
 

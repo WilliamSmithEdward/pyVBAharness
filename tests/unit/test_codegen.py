@@ -89,11 +89,25 @@ class TestSupportModule:
 
     def test_balanced_structure(self):
         source = codegen.support_module_source()
-        # Seven functions; five subs (reset, log, fail, and the asserts).
-        assert source.count("End Function") == 7
-        assert source.count("End Sub") == 5
+        # Functions: output, failure, stack, cov-report, json-value,
+        # array-json, array-dims, escape, last-erl.
+        assert source.count("End Function") == 9
+        # Subs: reset, log, fail, assert x2, progress-path, progress,
+        # cov-init, cov-hit.
+        assert source.count("End Sub") == 9
         assert source.count("Select Case") == source.count("End Select")
         assert source.count("If ") >= source.count("End If")
+
+    def test_new_support_surfaces_present(self):
+        source = codegen.support_module_source()
+        for needle in ("Public Function PyVbaStackJson",
+                       "Public Sub PyVbaSetProgressPath",
+                       "Public Sub PyVbaProgress",
+                       "Public Sub PyVbaCovInit",
+                       "Public Sub PyVbaCovHit",
+                       "Public Function PyVbaCovReportJson",
+                       '",""stack"":"'):
+            assert needle in source
 
     def test_assert_helpers_present(self):
         source = codegen.support_module_source()
@@ -142,3 +156,37 @@ class TestCallModule:
         # break in-VBA error trapping.
         assert "Application.Run" not in source
         assert source.count("End Function") == 1
+
+
+class TestBatchCodegen:
+    def test_arg_encoding_round_trip_prefixes(self):
+        assert codegen.encode_batch_arg(None) == "e:"
+        assert codegen.encode_batch_arg(True) == "b:1"
+        assert codegen.encode_batch_arg(False) == "b:0"
+        assert codegen.encode_batch_arg(5) == "i:5"
+        assert codegen.encode_batch_arg(2**40) == f"d:{float(2**40)!r}"
+        assert codegen.encode_batch_arg(2.5) == "d:2.5"
+        assert codegen.encode_batch_arg("5") == "s:5"
+        assert codegen.encode_batch_arg("=SUM(A1)") == "s:=SUM(A1)"
+
+    def test_arg_encoding_rejects_unsupported(self):
+        with pytest.raises(ValueError):
+            codegen.encode_batch_arg([1, 2])
+        with pytest.raises(ValueError):
+            codegen.encode_batch_arg("x" * (codegen.MAX_BATCH_ARG_CHARS + 1))
+
+    def test_batch_module_dispatch_shape(self):
+        function_sig = ProcedureSignature("F", KIND_FUNCTION, 2, 0, False)
+        sub_sig = ProcedureSignature("S", KIND_SUB, 0, 0, False)
+        source = codegen.batch_module_source([
+            ("ModA", "F", function_sig, 2),
+            ("ModB", "S", sub_sig, 0),
+            ("ModA", "F", function_sig, 2),  # duplicate: one Case only
+        ])
+        assert source.count('Case "ModA.F/2"') == 1
+        assert ("resultValue = ModA.F((DecodeArg(staged(i, 3))), "
+                "(DecodeArg(staged(i, 4))))") in source
+        assert "Call ModB.S" in source
+        assert "Application.Run" not in source
+        assert "Resume AppendItem" in source
+        assert "PyVbaResetOutput" in source

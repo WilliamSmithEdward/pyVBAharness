@@ -160,17 +160,25 @@ class TestInstrumentation:
                   "Public Function F() As Long\n"
                   "    F = 2\n"
                   "End Function\n")
-        out = instrument_error_lines(source).splitlines()
+        out = instrument_error_lines(source, module_name="Mod").splitlines()
         assert out[0] == "Public Sub Main()"
         assert out[1] == "    On Error GoTo PyVbaErl__"
         assert out[2] == "2 x = 1"
         assert out[3] == "    Exit Sub"
         assert out[4] == "PyVbaErl__:"
-        assert out[5].lstrip().startswith("PyVbaFail Erl,")
+        assert out[5].lstrip() == ('PyVbaFail "Mod.Main", Erl, Err.Number, '
+                                   "Err.Source, Err.Description")
         assert out[6] == "End Sub"
-        # Second procedure gets its own handler with the right Exit kind.
+        # Second procedure gets its own handler with the right Exit kind
+        # and its own frame name.
         assert "    Exit Function" in out
         assert out.count("PyVbaErl__:") == 2
+        assert any('PyVbaFail "Mod.F"' in line for line in out)
+
+    def test_frame_name_without_module(self):
+        source = "Sub Solo()\n    x = 1\nEnd Sub\n"
+        out = instrument_error_lines(source)
+        assert 'PyVbaFail "Solo", Erl' in out
 
     def test_property_gets_exit_property(self):
         source = ("Public Property Get V() As Long\n"
@@ -225,3 +233,71 @@ class TestInstrumentation:
         out = instrument_error_lines(source)
         assert "On Error Resume Next" in out
         assert "On Error GoTo PyVbaErl__" in out
+
+
+class TestCoverageInstrumentation:
+    def test_hit_rides_the_numbered_line(self):
+        from pyvbaharness.numbering import instrument_module
+
+        source = ("Sub A()\n"          # 1
+                  "    Dim x As Long\n"  # 2 (declaration: no hit)
+                  "    x = 1\n"          # 3
+                  "    x = 2\n"          # 4
+                  "End Sub\n")
+        result = instrument_module(source, module_name="M", coverage_id=7)
+        out = result.source.splitlines()
+        assert result.coverable_lines == [3, 4]
+        assert "3 PyVbaCovHit 7, 3: x = 1" in out
+        assert "4 PyVbaCovHit 7, 4: x = 2" in out
+        # Line count is preserved apart from the three handler lines and
+        # the On Error line, so Erl still maps to original lines.
+        assert len(out) == len(source.splitlines()) + 4
+
+    def test_block_openers_are_numbered_but_never_prefixed(self):
+        from pyvbaharness.numbering import instrument_module
+
+        source = ("Sub A()\n"
+                  "    If flag Then\n"
+                  "        x = 1\n"
+                  "    End If\n"
+                  "    For i = 1 To 3\n"
+                  "        y = i\n"
+                  "    Next i\n"
+                  "    Do\n"
+                  "        z = 1\n"
+                  "    Loop While False\n"
+                  "    With obj\n"
+                  "        .A = 1\n"
+                  "    End With\n"
+                  "    Select Case x\n"
+                  "    End Select\n"
+                  "End Sub\n")
+        result = instrument_module(source, module_name="M", coverage_id=1)
+        out = result.source
+        # A hit prefixed onto a block opener would turn it into a
+        # single-line form and break compilation.
+        for opener in ("If flag Then", "For i = 1 To 3", "Do",
+                       "With obj", "Select Case x"):
+            assert f"PyVbaCovHit 1, {opener}" not in out
+        assert "2 If flag Then" in out.splitlines()
+        # Bodies are still instrumented, and openers are not counted as
+        # coverable because their execution cannot be observed. Line 12
+        # (".A = 1" inside With) starts with a dot, which the conservative
+        # numberer leaves alone.
+        assert result.coverable_lines == [3, 6, 9]
+
+    def test_without_coverage_no_hits(self):
+        from pyvbaharness.numbering import instrument_module
+
+        result = instrument_module("Sub A()\n    x = 1\nEnd Sub\n",
+                                   module_name="M")
+        assert "PyVbaCovHit" not in result.source
+        assert result.coverable_lines == [2]
+
+    def test_unsafe_source_reports_no_coverable_lines(self):
+        from pyvbaharness.numbering import instrument_module
+
+        source = "Sub A()\n10 x = 1\nEnd Sub\n"
+        result = instrument_module(source, module_name="M", coverage_id=1)
+        assert result.source == source
+        assert result.coverable_lines == []

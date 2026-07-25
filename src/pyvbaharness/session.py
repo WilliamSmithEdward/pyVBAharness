@@ -33,8 +33,10 @@ from pathlib import Path
 from typing import Any
 
 from . import codegen, protocol, vbasig
-from .numbering import instrument_error_lines
+from .codegen import is_document_module
+from .numbering import instrument_error_lines, instrument_module
 from .lock import COMPILE_MUTEX_NAME, SessionLock
+from .screenshot import capture_excel_window
 from .oracle import OracleIssue, validate_session_trace
 from .process_control import (
     OwnedProcessManifest,
@@ -51,8 +53,10 @@ from .results import (
     TIMEOUT,
     VBA_ERROR,
     CompileResult,
+    CoverageReport,
     DialogRecord,
     HarnessError,
+    ModuleCoverage,
     RunResult,
     SessionDead,
     TestCaseResult,
@@ -70,15 +74,44 @@ class HarnessConfig:
     default_timeout_s: float = 30.0
     cleanup_grace_s: float = 5.0
     compile_watch_s: float = 10.0
+    # Hard cap when only idle_timeout is given for a run: liveness-based
+    # runs still cannot exceed this wall-clock ceiling.
+    max_run_s: float = 24 * 3600.0
     exclusive: bool = True
     lock_wait_s: float = 0.0
     auto_recycle: bool = True
     manifest_dir: Path | None = None
+    # Failure postmortems (screenshots) land here; swept after 7 days.
+    artifact_dir: Path | None = None
+    screenshot_on_timeout: bool = True
     python_executable: str = sys.executable
     extra_env: dict[str, str] = field(default_factory=dict)
     # Test seam: replaces "<python> -m pyvbaharness.worker" so the supervisor
     # state machine can be exercised against a scripted fake worker.
     worker_argv: list[str] | None = None
+
+
+_ARTIFACT_SWEEP_S = 7 * 24 * 3600.0
+
+
+def _default_artifact_dir() -> Path:
+    return (Path(os.environ.get("LOCALAPPDATA", "."))
+            / "pyvbaharness" / "artifacts")
+
+
+def _sweep_old_artifacts(directory: Path) -> None:
+    try:
+        if not directory.exists():
+            return
+        cutoff = time.time() - _ARTIFACT_SWEEP_S
+        for path in directory.rglob("*.png"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 class ExcelSession:
@@ -97,9 +130,14 @@ class ExcelSession:
         self._dead = True
         self._closed = False
         self._injected: dict[str, str] = {}
+        self._coverage: dict[str, tuple[int, list[int]]] = {}
         self._readers: list[threading.Thread] = []
         self._finalizer: weakref.finalize | None = None
         self.session_id = uuid.uuid4().hex[:12]
+        self._artifact_root = (self.config.artifact_dir
+                               or _default_artifact_dir())
+        self._artifact_dir = self._artifact_root / self.session_id
+        _sweep_old_artifacts(self._artifact_root)
         if self.config.exclusive:
             self._lock = SessionLock(timeout_s=self.config.lock_wait_s)
             self._lock.acquire()
@@ -132,8 +170,13 @@ class ExcelSession:
         argv = (list(self.config.worker_argv) if self.config.worker_argv
                 else [self.config.python_executable, "-m",
                       "pyvbaharness.worker"])
+        try:
+            self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
         self._proc = subprocess.Popen(
-            argv + ["--session", self.session_id],
+            argv + ["--session", self.session_id,
+                    "--artifacts", str(self._artifact_dir)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -147,6 +190,7 @@ class ExcelSession:
         self._queue = queue.Queue()
         self._stderr_tail.clear()
         self._injected.clear()
+        self._coverage.clear()
         self._readers = [
             threading.Thread(target=self._read_stdout, daemon=True,
                              name="pyvba-stdout"),
@@ -399,8 +443,16 @@ class ExcelSession:
         return self._cid
 
     def _command(self, name: str, params: dict[str, Any],
-                 timeout_s: float | None) -> dict[str, Any]:
+                 timeout_s: float | None,
+                 idle_timeout_s: float | None = None,
+                 on_progress: Any = None) -> dict[str, Any]:
         """Send one command and wait for its result under the watchdog.
+
+        ``timeout_s`` is the wall-clock cap. ``idle_timeout_s`` adds a
+        liveness deadline: every vba-progress event (PyVbaProgress in VBA)
+        pushes it forward, so a long run stays alive as long as it keeps
+        reporting, and dies within idle_timeout_s of going silent. When only
+        idle_timeout_s is given, the wall cap falls back to config.max_run_s.
 
         Returns the command-finished payload. Timeout / modal-block / worker
         death do not raise here; they return a synthesized payload with the
@@ -413,7 +465,9 @@ class ExcelSession:
                 raise SessionDead(
                     "Session was killed after a previous failure; call "
                     "recycle() or enable auto_recycle.")
-        timeout_s = timeout_s or self.config.default_timeout_s
+        if timeout_s is None:
+            timeout_s = (self.config.max_run_s if idle_timeout_s
+                         else self.config.default_timeout_s)
         try:
             cid = self._write_command(name, params, int(timeout_s * 1000))
         except OSError as err:
@@ -421,14 +475,28 @@ class ExcelSession:
                 name, RUNNER_ERROR, f"Could not reach the worker: {err}")
             self._abort("runner-error")
             return result
-        deadline = time.monotonic() + timeout_s
+        started = time.monotonic()
+        hard_deadline = started + timeout_s
+        idle_deadline = (started + idle_timeout_s if idle_timeout_s
+                         else None)
         while True:
+            deadline = hard_deadline
+            if idle_deadline is not None:
+                deadline = min(deadline, idle_deadline)
             item = self._next_item(deadline)
             if item is None:
-                # Terminal result first, then the kill, so the trace reads
+                if (idle_deadline is not None
+                        and idle_deadline < hard_deadline):
+                    reason = (f"No progress for {idle_timeout_s:.0f}s "
+                              f"(idle timeout).")
+                else:
+                    reason = f"Timed out after {timeout_s:.0f}s."
+                # Capture the window before the kill removes it, then the
+                # terminal result, then the kill, so the trace reads
                 # "hang reported -> owned Excel killed" (oracle ordering).
-                result = self._synthesize(
-                    name, TIMEOUT, f"Timed out after {timeout_s:.0f}s.")
+                shot = self._capture_timeout_screenshot(name)
+                result = self._synthesize(name, TIMEOUT, reason,
+                                          screenshot=shot)
                 self._abort(TIMEOUT)
                 return result
             kind, payload = item
@@ -443,6 +511,16 @@ class ExcelSession:
             event = payload
             self._ingest(event)
             event_kind = event.get("kind")
+            if event_kind == protocol.EV_PROGRESS:
+                if float(event.get("at", time.monotonic())) and idle_timeout_s:
+                    idle_deadline = time.monotonic() + idle_timeout_s
+                if on_progress is not None:
+                    try:
+                        on_progress(float(event.get("fraction", 0.0)),
+                                    str(event.get("message", "")))
+                    except Exception:  # noqa: BLE001 - callback is user code
+                        pass
+                continue
             if event_kind == protocol.EV_MODAL_BLOCKED and name != protocol.CMD_COMPILE:
                 result = self._synthesize(
                     name, MODAL_BLOCKED,
@@ -463,8 +541,8 @@ class ExcelSession:
                 return event
 
     def _synthesize(self, command: str, outcome: str, message: str,
-                    dialogs: list[dict[str, Any]] | None = None
-                    ) -> dict[str, Any]:
+                    dialogs: list[dict[str, Any]] | None = None,
+                    screenshot: str | None = None) -> dict[str, Any]:
         event = {
             "kind": protocol.EV_COMMAND_FINISHED,
             "session": self.session_id,
@@ -476,8 +554,23 @@ class ExcelSession:
         }
         if dialogs:
             event["dialogs"] = dialogs
+        if screenshot:
+            event["screenshot"] = screenshot
+            event["message"] = f"{message} Screenshot: {screenshot}"
         self.events.append(event)
         return event
+
+    def _capture_timeout_screenshot(self, command: str) -> str | None:
+        if not self.config.screenshot_on_timeout:
+            return None
+        pid = self.excel_pid
+        if pid <= 0:
+            return None
+        try:
+            return capture_excel_window(pid, self._artifact_dir,
+                                        f"timeout-{command}")
+        except Exception:  # noqa: BLE001 - capture must never block the kill
+            return None
 
     @staticmethod
     def _dialog_records(payload: dict[str, Any]) -> list[DialogRecord]:
@@ -491,8 +584,24 @@ class ExcelSession:
                 button_ids=[int(i) for i in raw.get("button_ids", []) or []],
                 classification=str(raw.get("classification", "excel-modal")),
                 action=str(raw.get("action", "none")),
+                screenshot=str(raw.get("screenshot", "")),
             ))
         return records
+
+    @staticmethod
+    def _parse_error(payload: dict[str, Any]) -> VbaError:
+        raw_line = int(payload.get("line", 0) or 0)
+        stack: list[tuple[str, int]] = []
+        for frame in payload.get("stack", []) or []:
+            if isinstance(frame, dict):
+                stack.append((str(frame.get("proc", "")),
+                              int(frame.get("line", 0) or 0)))
+        return VbaError(
+            number=int(payload.get("number", 0)),
+            source=str(payload.get("source", "")),
+            description=str(payload.get("description", "")),
+            line=raw_line if raw_line > 0 else None,
+            stack=stack)
 
     def _expect_passed(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Infrastructure commands must pass; anything else is an error."""
@@ -513,6 +622,7 @@ class ExcelSession:
 
     def new_workbook(self) -> dict[str, Any]:
         self._injected.clear()
+        self._coverage.clear()
         return self._expect_passed(
             self._command(protocol.CMD_NEW_WORKBOOK, {}, None))
 
@@ -521,25 +631,78 @@ class ExcelSession:
                       timeout: float | None = None) -> dict[str, Any]:
         resolved = str(Path(path).resolve())
         self._injected.clear()
+        self._coverage.clear()
         return self._expect_passed(self._command(
             protocol.CMD_OPEN_WORKBOOK,
             {"path": resolved, "read_only": read_only}, timeout))
 
+    def reset_sheets(self) -> dict[str, Any]:
+        """Clear every worksheet while keeping injected modules: a cheap
+        between-tests reset (a few ms against ~140 ms for new_workbook plus
+        reinjection)."""
+        return self._expect_passed(
+            self._command(protocol.CMD_RESET_SHEETS, {}, None))
+
+    def export_modules(self, directory: str | Path) -> list[str]:
+        """Export every non-harness VBA component to .bas/.cls/.frm files
+        (VBIDE Export), for version control and diffing."""
+        target = Path(directory).resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        data = self._expect_passed(self._command(
+            protocol.CMD_EXPORT_MODULES, {"dir": str(target)}, None))
+        return [str(f) for f in data.get("files", [])]
+
+    def import_modules(self, directory: str | Path,
+                       line_numbers: bool = False) -> list[str]:
+        """Inject every .bas/.cls file from a directory as a module.
+
+        Headers from exported files are stripped automatically; module names
+        come from file stems. Document modules (ThisWorkbook, Sheet1) and
+        forms are skipped: Excel owns those components and refuses to have
+        them recreated, so importing an export directory round-trips
+        cleanly.
+        """
+        imported: list[str] = []
+        for path in sorted(Path(directory).glob("*")):
+            if path.suffix.lower() not in (".bas", ".cls"):
+                continue
+            source = path.read_text(encoding="utf-8-sig", errors="replace")
+            if is_document_module(path.stem, source):
+                continue
+            kind = "class" if path.suffix.lower() == ".cls" else "standard"
+            self.add_module(path.stem, source, kind=kind,
+                            line_numbers=line_numbers)
+            imported.append(path.stem)
+        return imported
+
     def add_module(self, name: str, source: str, kind: str = "standard",
-                   line_numbers: bool = False) -> dict[str, Any]:
+                   line_numbers: bool = False,
+                   coverage: bool = False) -> dict[str, Any]:
         """Create or replace a module.
 
         With ``line_numbers=True`` the executable body lines are numbered so
-        a VBA error reports its source line (``result.error.line``). Injection
-        is skipped when this session already injected identical source into
-        the current workbook, which makes repeat run_vba calls cost a warm
-        run instead of a module replacement.
+        a VBA error reports its source line and stack. ``coverage=True``
+        (implies line numbering) additionally inserts line-coverage hooks;
+        collect results with ``coverage_report()``. Injection is skipped when
+        this session already injected identical source into the current
+        workbook, which makes repeat run_vba calls cost a warm run instead
+        of a module replacement.
         """
         codegen.validate_module_name(name)
         if kind not in ("standard", "class"):
             raise ValueError("kind must be 'standard' or 'class'")
-        if line_numbers:
-            source = instrument_error_lines(source)
+        coverable: list[int] = []
+        coverage_id: int | None = None
+        if coverage:
+            existing = self._coverage.get(name.lower())
+            coverage_id = (existing[0] if existing
+                           else len(self._coverage) + 1)
+            instrumented = instrument_module(source, module_name=name,
+                                             coverage_id=coverage_id)
+            source = instrumented.source
+            coverable = instrumented.coverable_lines
+        elif line_numbers:
+            source = instrument_error_lines(source, module_name=name)
         digest = hashlib.sha256(
             f"{kind}\x00{source}".encode("utf-8", "surrogatepass")
         ).hexdigest()
@@ -550,7 +713,41 @@ class ExcelSession:
             protocol.CMD_ADD_MODULE,
             {"name": name, "source": source, "kind": kind}, None))
         self._injected[cache_key] = digest
+        if coverage and coverage_id is not None:
+            self._coverage[name.lower()] = (coverage_id, coverable)
+            self._coverage_init()
         return data
+
+    def _coverage_init(self) -> None:
+        """(Re)size the in-VBA hit arrays. Re-init zeroes prior hits, so
+        coverage windows start when the instrumented module set changes."""
+        if not self._coverage:
+            return
+        max_line = max((max(lines) if lines else 1)
+                       for _cid, lines in self._coverage.values())
+        self._expect_passed(self._command(
+            protocol.CMD_COV_INIT,
+            {"modules": len(self._coverage), "max_line": max_line}, None))
+
+    def coverage_report(self) -> CoverageReport:
+        """Line coverage for every module injected with coverage=True.
+
+        Hits accumulate across runs since the last instrumented-module
+        change; recycling or replacing the workbook clears everything.
+        """
+        if not self._coverage:
+            return CoverageReport(modules={})
+        data = self._expect_passed(self._command(
+            protocol.CMD_COV_REPORT, {}, None))
+        hits = data.get("hits", [])
+        modules: dict[str, ModuleCoverage] = {}
+        for name, (coverage_id, coverable) in self._coverage.items():
+            module_hits: list[int] = []
+            if 0 < coverage_id <= len(hits):
+                module_hits = [int(line) for line in hits[coverage_id - 1]]
+            modules[name] = ModuleCoverage(
+                module=name, coverable=list(coverable), hit=module_hits)
+        return CoverageReport(modules=modules)
 
     def remove_module(self, name: str) -> dict[str, Any]:
         self._injected.pop(name.lower(), None)
@@ -564,22 +761,18 @@ class ExcelSession:
         return data.get("procs", [])
 
     def run_macro(self, target: str, *args: Any,
-                  timeout: float | None = None) -> RunResult:
+                  timeout: float | None = None,
+                  idle_timeout: float | None = None,
+                  on_progress: Any = None) -> RunResult:
         codegen.validate_run_target(target)
         started = time.monotonic()
         payload = self._command(protocol.CMD_RUN,
                                 {"target": target, "args": list(args)},
-                                timeout)
+                                timeout, idle_timeout_s=idle_timeout,
+                                on_progress=on_progress)
         duration = time.monotonic() - started
         outcome = str(payload.get("outcome", RUNNER_ERROR))
-        error = None
-        if outcome == VBA_ERROR:
-            raw_line = int(payload.get("line", 0) or 0)
-            error = VbaError(
-                number=int(payload.get("number", 0)),
-                source=str(payload.get("source", "")),
-                description=str(payload.get("description", "")),
-                line=raw_line if raw_line > 0 else None)
+        error = self._parse_error(payload) if outcome == VBA_ERROR else None
         return RunResult(
             outcome=outcome,
             duration_s=duration,
@@ -588,24 +781,85 @@ class ExcelSession:
             error=error,
             message=str(payload.get("message", "")),
             dialogs=self._dialog_records(payload),
+            screenshot=str(payload.get("screenshot", "")),
         )
+
+    def run_batch(self, calls: list[tuple[str, tuple]],
+                  timeout: float | None = None,
+                  idle_timeout: float | None = None) -> list[RunResult]:
+        """Run many calls in ONE COM round trip.
+
+        ``calls`` is a list of (target, args) pairs; args must be scalars
+        (str, int, float, bool, None). Results come back in call order, each
+        with the same fidelity as run_macro (value, output, error with line
+        and stack, per-call VBA-measured duration). The fixed ~15-20 ms
+        per-COM-call overhead is paid once for the whole batch instead of
+        once per call.
+
+        The whole batch shares one watchdog window; the default scales with
+        batch size. An infrastructure failure (timeout, blocked modal)
+        raises SessionDead, because per-call attribution is unknowable once
+        the batch is interrupted.
+        """
+        if not calls:
+            return []
+        if len(calls) > codegen.MAX_BATCH_CALLS:
+            raise ValueError(
+                f"run_batch supports at most {codegen.MAX_BATCH_CALLS} "
+                f"calls, got {len(calls)}.")
+        encoded = []
+        for target, args in calls:
+            codegen.validate_run_target(target)
+            if len(args) > codegen.MAX_RUN_ARGS:
+                raise ValueError(
+                    f"Batch call for {target} has {len(args)} arguments; "
+                    f"the limit is {codegen.MAX_RUN_ARGS}.")
+            encoded.append({
+                "target": target,
+                "args": [codegen.encode_batch_arg(a) for a in args],
+            })
+        if timeout is None:
+            timeout = self.config.default_timeout_s + 0.05 * len(calls)
+        data = self._expect_passed(self._command(
+            protocol.CMD_RUN_BATCH, {"calls": encoded}, timeout,
+            idle_timeout_s=idle_timeout))
+        results: list[RunResult] = []
+        for item in data.get("results", []):
+            outcome = str(item.get("outcome", RUNNER_ERROR))
+            error = (self._parse_error(item) if outcome == VBA_ERROR
+                     else None)
+            results.append(RunResult(
+                outcome=outcome,
+                duration_s=float(item.get("ms", 0) or 0) / 1000.0,
+                value=item.get("value"),
+                output=[str(x) for x in item.get("output", []) or []],
+                error=error,
+            ))
+        return results
 
     def run_vba(self, source: str, proc: str = "Main", args: tuple = (),
                 timeout: float | None = None,
+                idle_timeout: float | None = None,
+                on_progress: Any = None,
                 module_name: str = USER_MODULE_NAME,
-                line_numbers: bool = True) -> RunResult:
+                line_numbers: bool = True,
+                coverage: bool = False) -> RunResult:
         """Inject ``source`` as a module (replacing any prior one) and run
         ``proc`` from it. If no workbook is open, an unsaved in-memory
         workbook is created.
 
-        Line numbering is on by default so ``result.error.line`` reports the
-        failing source line; identical source is not reinjected, so calling
-        this in a loop costs a warm run, not a module replacement.
+        Line numbering is on by default so ``result.error.line`` and
+        ``result.error.stack`` report the failing source lines; identical
+        source is not reinjected, so calling this in a loop costs a warm
+        run, not a module replacement.
         """
         if not self._workbook_known():
             self.new_workbook()
-        self.add_module(module_name, source, line_numbers=line_numbers)
-        return self.run_macro(f"{module_name}.{proc}", *args, timeout=timeout)
+        self.add_module(module_name, source, line_numbers=line_numbers,
+                        coverage=coverage)
+        return self.run_macro(f"{module_name}.{proc}", *args,
+                              timeout=timeout, idle_timeout=idle_timeout,
+                              on_progress=on_progress)
 
     def eval(self, expression: str, timeout: float | None = None) -> Any:
         """Evaluate one VBA expression and return its value.
@@ -743,6 +997,11 @@ class ExcelSession:
     def is_dead(self) -> bool:
         """True while the session has no live worker (recycle pending)."""
         return self._dead
+
+    @property
+    def has_workbook(self) -> bool:
+        """True when the current worker generation holds an open workbook."""
+        return self._workbook_known()
 
     @property
     def excel_pid(self) -> int:

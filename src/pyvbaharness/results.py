@@ -31,12 +31,17 @@ class VbaError:
     source was not numbered or no numbered line had executed yet. It reports
     the last executed numbered line, so a line the numberer skipped
     attributes to the nearest numbered line above it.
+
+    ``stack`` lists (procedure, line) frames deepest-first: each
+    per-procedure handler that fired while the error propagated contributed
+    one frame, so a nested failure reads as a real VBA stack trace.
     """
 
     number: int
     source: str
     description: str
     line: int | None = None
+    stack: list[tuple[str, int]] = field(default_factory=list)
 
     def __str__(self) -> str:
         prefix = f"VBA error {self.number}"
@@ -44,7 +49,12 @@ class VbaError:
             prefix += f" from {self.source}"
         if self.line is not None:
             prefix += f" at line {self.line}"
-        return f"{prefix}: {self.description}"
+        text = f"{prefix}: {self.description}"
+        if self.stack:
+            frames = " <- ".join(f"{proc}:{line}"
+                                 for proc, line in self.stack)
+            text += f" [stack: {frames}]"
+        return text
 
 
 @dataclass
@@ -58,6 +68,7 @@ class DialogRecord:
     button_ids: list[int] = field(default_factory=list)
     classification: str = "excel-modal"
     action: str = "none"  # none | click:<caption> | blocked:<reason>
+    screenshot: str = ""  # PNG path captured before dismissal/kill, if any
 
 
 @dataclass
@@ -71,10 +82,46 @@ class RunResult:
     error: VbaError | None = None
     message: str = ""
     dialogs: list[DialogRecord] = field(default_factory=list)
+    screenshot: str = ""  # PNG of the Excel window on timeout, if captured
 
     @property
     def ok(self) -> bool:
         return self.outcome == PASSED
+
+
+@dataclass
+class ModuleCoverage:
+    """Line coverage for one instrumented module."""
+
+    module: str
+    coverable: list[int]
+    hit: list[int]
+
+    @property
+    def missed(self) -> list[int]:
+        hit_set = set(self.hit)
+        return [line for line in self.coverable if line not in hit_set]
+
+    @property
+    def percent(self) -> float:
+        if not self.coverable:
+            return 100.0
+        return 100.0 * len(self.hit) / len(self.coverable)
+
+
+@dataclass
+class CoverageReport:
+    """Aggregated line coverage across instrumented modules."""
+
+    modules: dict[str, ModuleCoverage]
+
+    @property
+    def percent(self) -> float:
+        coverable = sum(len(m.coverable) for m in self.modules.values())
+        if not coverable:
+            return 100.0
+        hit = sum(len(m.hit) for m in self.modules.values())
+        return 100.0 * hit / coverable
 
 
 @dataclass

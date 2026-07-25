@@ -116,6 +116,29 @@ def main() -> int:
 
         results["compile_accept"] = timed(
             lambda: session.compile_project(watch_seconds=5.0), 1)
+
+        # Batch execution: one COM round trip for many calls. Warm the
+        # dispatcher first so codegen is not counted as batch cost.
+        session.run_batch([("BenchA.Noop", ())])
+        for size in (200, 1000):
+            calls = [("BenchA.AddTwo", (n, 1)) for n in range(size)]
+            serial_started = time.perf_counter()
+            for n in range(size):
+                session.run_macro("BenchA.AddTwo", n, 1)
+            serial_s = time.perf_counter() - serial_started
+
+            batch_started = time.perf_counter()
+            batched = session.run_batch(calls, timeout=180)
+            batch_s = time.perf_counter() - batch_started
+            failed = sum(1 for r in batched if r.outcome != "passed")
+            results[f"batch_{size}_calls"] = {
+                "serial_s": round(serial_s, 4),
+                "serial_ms_per_call": round(serial_s / size * 1000, 3),
+                "batch_s": round(batch_s, 4),
+                "batch_ms_per_call": round(batch_s / size * 1000, 3),
+                "speedup": round(serial_s / batch_s, 2),
+                "failed": failed,
+            }
     finally:
         session.close()
 

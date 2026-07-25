@@ -4,7 +4,11 @@ Requires Windows, desktop Excel, and the Excel option "Trust access to the
 VBA project object model" (File > Options > Trust Center > Trust Center
 Settings > Macro Settings). See README.md.
 """
-from .numbering import add_line_numbers, instrument_error_lines
+from .numbering import (
+    add_line_numbers,
+    instrument_error_lines,
+    instrument_module,
+)
 from .results import (
     COMPILE_ACCEPTED,
     COMPILE_INFRA_FAILURE,
@@ -15,8 +19,10 @@ from .results import (
     TIMEOUT,
     VBA_ERROR,
     CompileResult,
+    CoverageReport,
     DialogRecord,
     HarnessError,
+    ModuleCoverage,
     RunResult,
     SessionDead,
     SessionLockHeld,
@@ -27,7 +33,7 @@ from .results import (
 from .pool import SessionPool
 from .session import ExcelSession, HarnessConfig, run_vba
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "ExcelSession",
@@ -36,8 +42,11 @@ __all__ = [
     "run_vba",
     "add_line_numbers",
     "instrument_error_lines",
+    "instrument_module",
     "RunResult",
     "CompileResult",
+    "CoverageReport",
+    "ModuleCoverage",
     "DialogRecord",
     "TestCaseResult",
     "VbaError",

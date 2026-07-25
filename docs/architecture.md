@@ -215,6 +215,39 @@ the dialog, and the watcher's records are swept once more before an accept
 is reported so a rejection can never be outrun. The watch window remains as
 the fallback when neither signal appears.
 
+### Modifying the VBProject resets VBA module-level state
+
+Adding or replacing any module clears every module-level variable in the
+project. Anything the harness pushes into the support module is silently
+lost the moment a dispatcher is regenerated, which is exactly what happens
+between injection and the run. Found twice: progress heartbeats stopped
+arriving, and coverage hit arrays came back empty, both with no error
+anywhere. The fix pattern is lazy re-push guarded by a flag that
+`_write_module` clears (`_ensure_progress_path`, `_ensure_coverage`).
+
+### PrintWindow blocks on a non-pumping window
+
+`PrintWindow` sends a message, so on a wedged Excel (the exact case a
+failure screenshot is for) it never returns. During development it wedged
+the timeout path itself, converting the harness's core guarantee into a
+hang. Now `IsHungAppWindow` selects `BitBlt` instead, and every capture runs
+on a daemon thread with a join timeout, so no GDI call can delay a kill.
+
+### A coverage hit cannot prefix a block opener
+
+`PyVbaCovHit 1, 4: If flag Then` turns a block `If` into a single-line `If`,
+and the matching `End If` then fails to compile, surfacing as a modal
+compile-error dialog. Block openers (`If`, `For`, `Do`, `While`, `Select`,
+`With`) are numbered but never prefixed, and are excluded from the coverable
+set because their execution cannot be observed.
+
+### Worksheet cells coerce staged text
+
+Batch arguments stage through a hidden worksheet, where `"5"` would become
+the number 5, `"3/4"` a date, and `"=SUM(A1)"` a formula. Every value is
+type-prefixed (`s:`, `i:`, `d:`, `b:`, `e:`) so cells always hold literal
+text and round-trip exactly; the VBA `DecodeArg` reverses it.
+
 ### Process liveness is not process existence
 
 `OpenProcess` keeps succeeding for an exited process while any handle to it
@@ -229,9 +262,17 @@ it, teardown checks reported a dead Excel as alive.
   across many runs and recycles on any abnormal outcome. One-shot `run_vba`
   remains available for full isolation.
 - Injection cache. `add_module` hashes (kind, transformed source); identical
-  content is not resent, so `run_vba` in a loop costs a warm run (20 ms)
-  instead of a module replacement (76 ms). The cache clears on workbook
-  change and recycle, and `remove_module` evicts its entry.
+  content is not resent, so `run_vba` in a loop costs a warm run instead of
+  a module replacement (97 ms). The cache clears on workbook change and
+  recycle, and `remove_module` evicts its entry.
+- Signature cache. Resolving a run target used to read the module's source
+  through VBE COM on every single run. Caching it (invalidated by any
+  module write) took a warm run from 15 ms to 0.6 ms, a 25x improvement and
+  the largest single performance change in the project.
+- Batch execution. `run_batch` stages many calls on a hidden worksheet and
+  runs them from one generated dispatcher in a single COM round trip:
+  2.7x faster at 50 calls, 4.7x at 200, 9.9x at 3000 (0.066 ms per call).
+  Per-call fidelity is unchanged, including error lines and stacks.
 - Unsaved in-memory workbooks by default. `new_workbook()` never touches disk
   (the XLIDE syntax oracle uses the same trick to bypass file macro-security
   policy); opening an existing workbook defaults to read-only with
@@ -327,22 +368,29 @@ src/pyvbaharness/
   session.py          supervisor: worker lifecycle, watchdogs, abort path
   pool.py             SessionPool: N sessions, work queue, sharded run_tests
   protocol.py         command/event types and JSON codec
-  results.py          RunResult, CompileResult, TestCaseResult, outcomes
-  codegen.py          support-module and per-target dispatcher generation
-  vbasig.py           VBA declaration parsing (kind, arity) for direct calls
-  numbering.py        line numbering + per-procedure Erl instrumentation
+  results.py          RunResult, CompileResult, coverage, outcomes
+  codegen.py          support, dispatcher, and batch module generation
+  vbasig.py           VBA declaration parsing (kind, arity, param types)
+  numbering.py        line numbering, Erl handlers, coverage hooks
   ranges.py           write chunk planning and block validation
   dialog_policy.py    pure dialog classification / dismissal decision
   oracle.py           pure trace validator
   process_control.py  taskkill, manifests, stale sweep, kill-on-close job
-  lock.py             machine-wide session lock
-  worker/__main__.py  worker entry point (stdin commands -> stdout events)
+  lock.py             session and compile mutexes
+  screenshot.py       bounded GDI window capture + minimal PNG encoder
+  properties.py       Hypothesis strategies from VBA signatures
+  pytest_plugin.py    .bas collection as pytest items
+  worker/__main__.py  worker entry point, command loop, progress tail
   worker/excel_host.py  all Excel COM calls
   worker/watcher.py   ctypes window scanner + dismissal executor
-tests/unit            pure logic, no Excel required (125 tests)
-tests/live            real Excel, opt-in via -m live (38 tests)
-benchmarks/           startup and per-run overhead measurements
+tests/unit            pure logic, no Excel required (147 tests)
+tests/live            real Excel, opt-in via -m live (54 tests)
+benchmarks/           per-run, batch, and pool scaling measurements
 ```
+
+How to change this codebase, including the full catalog of measured Excel
+behaviors and the recipe for adding a capability end to end, is in
+[IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md).
 
 Pure-logic modules (`dialog_policy`, `oracle`, `codegen`, `vbasig`, `ranges`,
 `protocol`) hold everything unit-testable so the live suite stays small and

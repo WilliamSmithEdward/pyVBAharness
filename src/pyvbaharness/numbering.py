@@ -22,12 +22,14 @@ So the instrumentation does two things per procedure:
            ...
            Exit Sub
        PyVbaErl__:
-           PyVbaFail Erl, Err.Number, Err.Source, Err.Description
+           PyVbaFail "Mod.Main", Erl, Err.Number, Err.Source, Err.Description
        End Sub
 
-``PyVbaFail`` (support module) records the FIRST noted line - the deepest
-frame, i.e. the origin - and re-raises, so the error still propagates to the
-dispatcher with its number, source, and description intact. The inserted
+``PyVbaFail`` (support module) appends a stack frame per handler that fires
+(deepest first, so the chain of a propagating error becomes a VBA stack
+trace), keeps the FIRST noted line as the error's origin line, and
+re-raises, so the error still propagates to the dispatcher with its number,
+source, and description intact. The inserted
 lines carry no numbers themselves (a number on the handler's call line would
 overwrite ``Erl`` before it is read) and declare no locals (no name
 collisions with user code). A user procedure's own ``On Error`` statements
@@ -53,6 +55,7 @@ risks duplicates, which is a VBA compile error.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from .vbasig import strip_comment
 
@@ -61,7 +64,7 @@ HANDLER_LABEL = "PyVbaErl__"
 _DECL_RE = re.compile(
     r"^[ \t]*(?:(?:Public|Private|Friend|Static)[ \t]+)*"
     r"(?P<kind>Sub|Function|Property)"
-    r"(?:[ \t]+(?:Get|Let|Set))?[ \t]+[A-Za-z]",
+    r"(?:[ \t]+(?:Get|Let|Set))?[ \t]+(?P<name>[A-Za-z]\w*)",
     re.IGNORECASE,
 )
 _END_PROC_RE = re.compile(r"^[ \t]*End[ \t]+(?:Sub|Function|Property)\b",
@@ -80,6 +83,14 @@ _SKIP_FIRST_WORDS = {
 }
 
 _FIRST_WORD_RE = re.compile(r"^[ \t]*([A-Za-z_#]\w*)")
+
+# Statements that open a multi-line block must be the FIRST statement on
+# their line: "PyVbaCovHit 1, 4: If flag Then" turns a block If into a
+# single-line If, and the matching End If then fails to compile (observed
+# live as a modal compile-error dialog). Such lines are still numbered, so
+# Erl mapping is unaffected; they simply carry no coverage hit and are not
+# counted as coverable, because their execution cannot be observed.
+_BLOCK_OPENERS = {"if", "for", "do", "while", "select", "with"}
 
 
 def _is_continued(line: str) -> bool:
@@ -152,25 +163,49 @@ def add_line_numbers(source: str) -> str:
     return "\r\n".join(out) + ("\r\n" if source.endswith(("\n", "\r")) else "")
 
 
-def instrument_error_lines(source: str) -> str:
-    """Number executable lines AND install per-procedure Erl capture.
+@dataclass
+class InstrumentedModule:
+    """Instrumented source plus the lines the coverage hooks can observe."""
 
-    Returns the source unchanged when instrumentation would be unsafe
-    (existing numeric labels, or the handler label already present).
+    source: str
+    coverable_lines: list[int]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.coverable_lines)
+
+
+def instrument_module(source: str, module_name: str = "",
+                      coverage_id: int | None = None) -> InstrumentedModule:
+    """Number executable lines, install per-procedure Erl capture, and
+    (optionally) insert coverage hits.
+
+    One pass produces all three because they interlock: numbers make ``Erl``
+    meaningful, the per-procedure handler reports frames as
+    ``module_name.Proc``, and a coverage hit rides the numbered line as a
+    colon-compound statement (``42 PyVbaCovHit 3, 42: x = 1``) so the line
+    count, and therefore the Erl-to-source mapping, never shifts.
+
+    Returns the source unchanged (empty coverable_lines) when
+    instrumentation would be unsafe: existing numeric labels or the handler
+    label already present.
     """
-    if HANDLER_LABEL in source:
-        return source
-    numbered = add_line_numbers(source)
-    if numbered == source and _has_existing_numbers(source):
-        return source
+    if HANDLER_LABEL in source or _has_existing_numbers(source):
+        return InstrumentedModule(source, [])
+    lines = source.splitlines()
+    if len(lines) > 60000:
+        return InstrumentedModule(source, [])
 
-    lines = numbered.splitlines()
+    hit_prefix = (f"PyVbaCovHit {coverage_id}, "
+                  if coverage_id is not None else None)
     out: list[str] = []
+    coverable: list[int] = []
     in_body = False
     continued = False
     decl_pending = False
     proc_kind = ""
-    for line in lines:
+    proc_name = ""
+    for index, line in enumerate(lines, start=1):
         was_continued = continued
         continued = _is_continued(line)
         if was_continued:
@@ -184,6 +219,7 @@ def instrument_error_lines(source: str) -> str:
             if match and not _INLINE_END_PROC_RE.search(line[match.end():]):
                 in_body = True
                 proc_kind = match.group("kind").capitalize()
+                proc_name = match.group("name")
                 out.append(line)
                 if continued:
                     decl_pending = True  # inject after the decl finishes
@@ -194,14 +230,36 @@ def instrument_error_lines(source: str) -> str:
             continue
         if _END_PROC_RE.match(line):
             in_body = False
+            frame = (f"{module_name}.{proc_name}" if module_name
+                     else proc_name)
             out.append(f"    Exit {proc_kind}")
             out.append(f"{HANDLER_LABEL}:")
-            out.append("    PyVbaFail Erl, Err.Number, Err.Source, "
-                       "Err.Description")
+            out.append(f'    PyVbaFail "{frame}", Erl, Err.Number, '
+                       "Err.Source, Err.Description")
             out.append(line)
             continue
-        out.append(line)
-    return "\r\n".join(out) + ("\r\n" if source.endswith(("\n", "\r")) else "")
+        if _numberable(line):
+            body = line.lstrip()
+            first_word = _FIRST_WORD_RE.match(line)
+            opens_block = (first_word is not None
+                           and first_word.group(1).lower() in _BLOCK_OPENERS)
+            if hit_prefix is not None and not opens_block:
+                coverable.append(index)
+                out.append(f"{index} {hit_prefix}{index}: {body}")
+            else:
+                if hit_prefix is None:
+                    coverable.append(index)
+                out.append(f"{index} {body}")
+        else:
+            out.append(line)
+    text = "\r\n".join(out) + ("\r\n" if source.endswith(("\n", "\r"))
+                               else "")
+    return InstrumentedModule(text, coverable)
+
+
+def instrument_error_lines(source: str, module_name: str = "") -> str:
+    """Back-compatible wrapper: numbering plus handlers, no coverage."""
+    return instrument_module(source, module_name=module_name).source
 
 
 def _has_existing_numbers(source: str) -> bool:

@@ -128,10 +128,12 @@ class DialogWatcher:
 
     def __init__(self, pid: int,
                  on_record: Callable[[WatcherRecord], None],
-                 interval_s: float = 0.25) -> None:
+                 interval_s: float = 0.25,
+                 artifacts_dir: str = "") -> None:
         self.pid = pid
         self.on_record = on_record
         self.interval_s = interval_s
+        self.artifacts_dir = artifacts_dir
         self._records: list[WatcherRecord] = []
         self._records_lock = threading.Lock()
         self._seen: set[str] = set()
@@ -232,7 +234,28 @@ class DialogWatcher:
                 record.action = "blocked:low-level-dismiss-failed"
         else:
             record.action = f"blocked:{decision.reason}"
+        if record.action.startswith("blocked:"):
+            self._attach_screenshot(record, hwnd)
         self._emit(record)
+
+    def _attach_screenshot(self, record: WatcherRecord, hwnd: int) -> None:
+        """Capture a blocking dialog before it is reported (and Excel is
+        killed): the picture is often the fastest answer to "what dialog?"."""
+        if not self.artifacts_dir:
+            return
+        try:
+            from ..screenshot import capture_window_safely
+
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            # Bounded: the dialog's owner process is often wedged, and the
+            # watcher must keep scanning no matter what GDI does.
+            path = capture_window_safely(
+                hwnd, f"{self.artifacts_dir}\\dialog-{stamp}-{hwnd}.png",
+                timeout_s=2.0)
+            if path:
+                record.extra["screenshot"] = path
+        except Exception:
+            pass  # a failed capture must never change dialog handling
 
     def _handle_vbe_window(self, hwnd: int) -> None:
         if self._suppress_vbe.is_set() or self._vbe_reported:
@@ -244,4 +267,5 @@ class DialogWatcher:
             capture=DialogCapture(title=title), handle=hwnd,
             action="blocked:vbe-window-visible",
             extra={"break_mode": "[break]" in title.lower()})
+        self._attach_screenshot(record, hwnd)
         self._emit(record)

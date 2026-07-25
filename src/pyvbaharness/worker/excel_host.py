@@ -18,6 +18,7 @@ import ctypes
 import ctypes.wintypes as wt
 import gc
 import time
+from pathlib import Path
 from typing import Any
 
 import pythoncom
@@ -110,9 +111,15 @@ class ExcelHost:
         self.workbook: Any = None
         self.pid: int = 0
         self.job_active = False
+        self.progress_path: str = ""
+        self._progress_set = False
+        self._cov_dims: tuple[int, int] | None = None
+        self._cov_set = False
         self._job: KillOnCloseJob | None = None
         self._support_installed = False
         self._call_signature: tuple[str, str, int] | None = None
+        self._batch_signature: frozenset | None = None
+        self._resolved: dict[str, tuple[str, str, vbasig.ProcedureSignature]] = {}
         self._compile_control: Any = None
 
     # ----- lifecycle -------------------------------------------------------
@@ -168,6 +175,13 @@ class ExcelHost:
         # as the fallback for that case.
         self._job = KillOnCloseJob()
         self.job_active = self._job.assign(self.pid)
+        excel_version = ""
+        excel_build = ""
+        try:
+            excel_version = str(app.Version)
+            excel_build = str(app.Build)
+        except com_error:
+            pass
         return {
             "pid": self.pid,
             "attached": False,
@@ -175,6 +189,8 @@ class ExcelHost:
             "display_alerts": False,
             "enable_events": False,
             "job_kill_on_close": self.job_active,
+            "excel_version": excel_version,
+            "excel_build": excel_build,
         }
 
     @staticmethod
@@ -264,6 +280,9 @@ class ExcelHost:
     def _reset_injection_state(self) -> None:
         self._support_installed = False
         self._call_signature = None
+        self._batch_signature = None
+        self._progress_set = False
+        self._resolved = {}
 
     @_wrap_com("add module")
     def add_module(self, name: str, source: str, kind: str) -> dict[str, Any]:
@@ -275,6 +294,14 @@ class ExcelHost:
         """Create or replace a module. Skips the reserved-name check so the
         harness can inject its own modules."""
         self._require_workbook()
+        self._resolved = {}  # module change invalidates cached signatures
+        # Changing the VBProject resets VBA module-level state, so anything
+        # pushed into the support module (progress path, coverage arrays)
+        # is gone and must be re-pushed before the next run. Observed live
+        # twice: progress events stopped and coverage hits vanished because
+        # the dispatcher module was written after those were set.
+        self._progress_set = False
+        self._cov_set = False
         component_kind = (VBEXT_CT_CLASS_MODULE if kind == "class"
                           else VBEXT_CT_STD_MODULE)
         body = codegen.strip_module_header(source)
@@ -320,12 +347,22 @@ class ExcelHost:
 
     def _resolve_target(self, target: str
                         ) -> tuple[str, str, vbasig.ProcedureSignature]:
-        """Find the target's module and parse its declaration.
+        """Find the target's module and parse its declaration (cached).
 
         A bare ``Proc`` target is searched across every component; harness
         modules are skipped so the search cannot resolve into the injected
-        dispatcher.
+        dispatcher. The cache is invalidated whenever a module changes.
         """
+        cached = self._resolved.get(target.lower())
+        if cached is not None:
+            return cached
+        resolved = self._resolve_target_uncached(target)
+        self._resolved[target.lower()] = resolved
+        return resolved
+
+    def _resolve_target_uncached(self, target: str
+                                 ) -> tuple[str, str,
+                                            vbasig.ProcedureSignature]:
         parts = target.split(".")
         components = self.workbook.VBProject.VBComponents
         reserved = {n.lower() for n in codegen.HARNESS_MODULE_NAMES}
@@ -363,6 +400,41 @@ class ExcelHost:
         self._write_module(codegen.SUPPORT_MODULE_NAME,
                            codegen.support_module_source(), "standard")
         self._support_installed = True
+
+    def _ensure_progress_path(self) -> None:
+        """Push the progress-file path into VBA, after all module writes.
+
+        Excel is not a child of the worker, so environment variables cannot
+        carry the path. It must be (re)pushed whenever the VBProject
+        changed, because that resets VBA module-level state.
+        """
+        if not self.progress_path or self._progress_set:
+            return
+        self.run_support("PyVbaSetProgressPath", [self.progress_path])
+        self._progress_set = True
+
+    def _ensure_coverage(self) -> None:
+        """Re-arm the coverage arrays after a VBProject change.
+
+        Same landmine as the progress path: writing a module resets VBA
+        module-level state, which clears mCovReady and the hit arrays, so
+        every hit after a dispatcher rewrite would be dropped silently.
+        Re-initializing also zeroes accumulated hits, which is honest: VBA
+        already discarded them.
+        """
+        if self._cov_dims is None or self._cov_set:
+            return
+        modules, max_line = self._cov_dims
+        self.run_support("PyVbaCovInit", [modules, max_line])
+        self._cov_set = True
+
+    @_wrap_com("call support procedure")
+    def run_support(self, proc: str, args: list[Any]) -> Any:
+        """Internal Run into the support module (coverage, progress path)."""
+        self._require_workbook()
+        ref = codegen.qualified_run_ref(
+            str(self.workbook.Name), codegen.SUPPORT_MODULE_NAME, proc)
+        return self.app.Run(ref, *args)
 
     @_wrap_com("install support module")
     def ensure_support_module(self) -> dict[str, Any]:
@@ -411,6 +483,8 @@ class ExcelHost:
                 f"argument(s); {len(args)} were supplied.")
         self._ensure_support()
         self._ensure_dispatcher(module, proc, signature, len(args))
+        self._ensure_progress_path()
+        self._ensure_coverage()
         ref = codegen.qualified_run_ref(
             str(self.workbook.Name), codegen.CALL_MODULE_NAME,
             codegen.RUNNER_ENTRY)
@@ -464,14 +538,18 @@ class ExcelHost:
             width = validate_block(data)
         except ValueError as err:
             raise HostError(f"write_range: {err}") from err
-        height = len(data)
         worksheet = self.workbook.Worksheets(sheet)
         anchor = worksheet.Range(start_cell)
-        base_row = int(anchor.Row)
-        base_column = int(anchor.Column)
+        chunks = self._write_block(worksheet, int(anchor.Row),
+                                   int(anchor.Column), data)
+        return {"rows": len(data), "columns": width, "chunks": chunks}
 
+    def _write_block(self, worksheet: Any, base_row: int, base_column: int,
+                     data: list[list[Any]]) -> int:
+        """Chunked Value2 writes; shared by write_range and batch staging."""
+        width = len(data[0])
         chunks = 0
-        for chunk in plan_write_chunks(height, width,
+        for chunk in plan_write_chunks(len(data), width,
                                        MAX_WRITE_CELLS_PER_CHUNK):
             piece = tuple(
                 tuple(row[chunk.column_start:chunk.column_end])
@@ -482,7 +560,121 @@ class ExcelHost:
                                    base_column + chunk.column_end - 1)
             worksheet.Range(first, last).Value2 = piece
             chunks += 1
-        return {"rows": height, "columns": width, "chunks": chunks}
+        return chunks
+
+    @_wrap_com("reset sheets")
+    def reset_sheets(self) -> dict[str, Any]:
+        """Clear every worksheet's cells while keeping injected modules.
+
+        A cheap between-tests reset: new_workbook costs a workbook plus
+        module reinjection; this costs a few Clear calls.
+        """
+        self._require_workbook()
+        sheets = self.workbook.Worksheets
+        cleared = 0
+        for index in range(1, int(sheets.Count) + 1):
+            sheets.Item(index).Cells.Clear()
+            cleared += 1
+        return {"cleared_sheets": cleared}
+
+    # ----- batch execution -------------------------------------------------
+
+    @_wrap_com("run VBA batch")
+    def run_batch(self, calls: list[dict[str, Any]]) -> str:
+        """Stage encoded calls, run the generated batch dispatcher once.
+
+        Returns the dispatcher's JSON array string. Staging goes through the
+        very hidden batch sheet with type-prefixed text cells (exact
+        round-trip fidelity; see codegen.encode_batch_arg) and the chunked
+        writer (the post-macro Value2 wedge applies to staging too).
+        """
+        self._require_workbook()
+        if len(calls) > codegen.MAX_BATCH_CALLS:
+            raise HostError(
+                f"run_batch supports at most {codegen.MAX_BATCH_CALLS} "
+                f"calls, got {len(calls)}.")
+        entries: list[tuple[str, str, vbasig.ProcedureSignature, int]] = []
+        rows: list[list[Any]] = []
+        for index, call in enumerate(calls):
+            target = str(call["target"])
+            encoded_args = [str(a) for a in call.get("args", [])]
+            codegen.validate_run_target(target)
+            if len(encoded_args) > codegen.MAX_RUN_ARGS:
+                raise HostError(
+                    f"Batch call {index} has {len(encoded_args)} arguments; "
+                    f"the limit is {codegen.MAX_RUN_ARGS}.")
+            module, proc, signature = self._resolve_target(target)
+            if not signature.accepts(len(encoded_args)):
+                raise HostError(
+                    f"Batch call {index}: {module}.{proc} takes "
+                    f"{signature.arity_text()} argument(s); "
+                    f"{len(encoded_args)} were supplied.")
+            entries.append((module, proc, signature, len(encoded_args)))
+            row: list[Any] = [f"{module}.{proc}", len(encoded_args)]
+            row.extend(encoded_args)
+            row.extend([""] * (codegen.MAX_RUN_ARGS - len(encoded_args)))
+            rows.append(row)
+
+        self._ensure_support()
+        key_set = frozenset(
+            codegen.batch_call_key(m, p, n) for m, p, _s, n in entries)
+        if self._batch_signature != key_set:
+            self._write_module(codegen.BATCH_MODULE_NAME,
+                               codegen.batch_module_source(entries),
+                               "standard")
+            self._batch_signature = key_set
+        self._ensure_progress_path()
+        self._ensure_coverage()
+        sheet = self._batch_sheet()
+        self._write_block(sheet, 1, 1, rows)
+        ref = codegen.qualified_run_ref(
+            str(self.workbook.Name), codegen.BATCH_MODULE_NAME,
+            codegen.BATCH_ENTRY)
+        return str(self.app.Run(ref, len(calls)))
+
+    def _batch_sheet(self) -> Any:
+        sheets = self.workbook.Worksheets
+        for index in range(1, int(sheets.Count) + 1):
+            candidate = sheets.Item(index)
+            if str(candidate.Name) == codegen.BATCH_SHEET_NAME:
+                return candidate
+        sheet = sheets.Add()
+        sheet.Name = codegen.BATCH_SHEET_NAME
+        sheet.Visible = 2  # xlSheetVeryHidden: invisible even in the UI list
+        return sheet
+
+    # ----- module export and coverage --------------------------------------
+
+    @_wrap_com("export modules")
+    def export_modules(self, directory: str) -> dict[str, Any]:
+        """Export every non-harness component via VBIDE Export."""
+        self._require_workbook()
+        extensions = {1: ".bas", 2: ".cls", 3: ".frm", 100: ".cls"}
+        reserved = {n.lower() for n in codegen.HARNESS_MODULE_NAMES}
+        exported: list[str] = []
+        components = self.workbook.VBProject.VBComponents
+        for index in range(1, int(components.Count) + 1):
+            component = components.Item(index)
+            name = str(component.Name)
+            if name.lower() in reserved:
+                continue
+            extension = extensions.get(int(component.Type))
+            if extension is None:
+                continue
+            target = str(Path(directory) / f"{name}{extension}")
+            component.Export(target)
+            exported.append(target)
+        return {"files": exported}
+
+    def coverage_init(self, module_count: int, max_line: int) -> None:
+        self._ensure_support()
+        self._cov_dims = (module_count, max_line)
+        self._cov_set = False
+        self._ensure_coverage()
+
+    def coverage_report(self) -> str:
+        self._ensure_support()
+        return str(self.run_support("PyVbaCovReportJson", []))
 
     # ----- visibility and compile ------------------------------------------
 
