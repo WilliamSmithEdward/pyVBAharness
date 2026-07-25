@@ -1,4 +1,4 @@
-# pyVBAharness
+﻿# pyVBAharness
 
 Run VBA in desktop Excel from Python, under a supervisor that enforces a
 deadline on every call.
@@ -459,11 +459,11 @@ Excel processes survive.
 
 | Document | Contents |
 | --- | --- |
-| [Architecture](docs/architecture.md) | Process model, hang-resistance layers, design rationale |
-| [Troubleshooting](docs/troubleshooting.md) | What each failure means and what to do about it |
-| [Implementation guide](docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Excel behaviors |
-| [Releasing](docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
+| [Architecture](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/architecture.md) | Process model, hang-resistance layers, design rationale |
+| [Troubleshooting](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/troubleshooting.md) | What each failure means and what to do about it |
+| [Implementation guide](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Excel behaviors |
+| [Releasing](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE).
