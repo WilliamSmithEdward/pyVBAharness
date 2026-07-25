@@ -1,0 +1,111 @@
+name: Publish
+
+# Publishing runs on a released tag, or manually against TestPyPI first.
+# Authentication is PyPI Trusted Publishing (OIDC): no API token is stored
+# in this repository. See docs/RELEASING.md for the one-time PyPI setup.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Index to publish to
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m pip install -e ".[dev,fuzz]"
+
+      - name: Unit tests
+        run: python -m pytest tests/unit -q
+
+      - name: Read project version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Output "Project version: $version"
+
+      - name: Check the release tag matches the project version
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          $version = "${{ steps.version.outputs.version }}"
+          if ($tag -ne $version) {
+            throw "Release tag '$tag' does not match project version '$version'. Bump pyproject.toml and src/pyvbaharness/__init__.py together, then retag."
+          }
+          Write-Output "Tag and version agree: $version"
+
+      - name: Build distributions
+        run: |
+          python -m build
+          python -m twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    # Manual dry run: publish to TestPyPI and confirm the artifact installs
+    # from there before touching the real index.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/pyvbaharness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # A rebuilt artifact for an existing version would otherwise fail
+          # the whole run; on TestPyPI that is noise, not a problem.
+          skip-existing: true
+
+  pypi:
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyvbaharness
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

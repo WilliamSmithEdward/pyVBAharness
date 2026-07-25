@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    # Windows only: several modules bind user32/kernel32 through ctypes at
+    # import time, so the package cannot even be imported elsewhere.
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,fuzz]"
+
+      - name: Unit tests
+        # The live suite needs a real Excel installation, which hosted
+        # runners do not have. It stays a local gate; see the note in the
+        # build job summary.
+        run: python -m pytest tests/unit -q
+
+  build:
+    runs-on: windows-latest
+    needs: unit
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build distributions
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Verify wheel contents
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist -Filter *.whl | Select-Object -First 1
+          if (-not $wheel.Name.EndsWith("py3-none-any.whl")) {
+            throw "Expected a universal wheel, got $($wheel.Name)"
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($wheel.FullName)
+          $names = $zip.Entries.FullName
+          $zip.Dispose()
+          foreach ($required in @(
+              "pyvbaharness/__init__.py",
+              "pyvbaharness/pytest_plugin.py",
+              "pyvbaharness/worker/__main__.py")) {
+            if ($names -notcontains $required) {
+              throw "Wheel is missing $required"
+            }
+          }
+          if ($names | Where-Object { $_ -like "tests/*" }) {
+            throw "Wheel must not ship the test suite"
+          }
+          Write-Output "Wheel contents verified: $($wheel.Name)"
+
+      - name: Install and smoke-test the wheel in a clean environment
+        shell: pwsh
+        run: |
+          python -m venv .verify
+          $py = ".verify\Scripts\python.exe"
+          $wheel = (Get-ChildItem dist -Filter *.whl | Select-Object -First 1).FullName
+          & $py -m pip install --quiet $wheel
+          & $py -c "import pyvbaharness; print('version', pyvbaharness.__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "The installed wheel does not import" }
+          & $py -m pyvbaharness doctor
+          # doctor reports 2 when the environment cannot host a run, which is
+          # always true on a hosted runner (no Excel). Any other non-zero code
+          # means the CLI itself is broken.
+          if ($LASTEXITCODE -notin 0, 2) {
+            throw "doctor exited $LASTEXITCODE"
+          }
+          & ".verify\Scripts\pyvbaharness.exe" doctor
+          if ($LASTEXITCODE -notin 0, 2) {
+            throw "console script exited $LASTEXITCODE"
+          }
+          Write-Output "Wheel installs, imports, and exposes its CLI"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error

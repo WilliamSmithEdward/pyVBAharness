@@ -11,6 +11,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.verify/
 
 # Test and benchmark working output (versioned baselines are tracked)
 tests/output/

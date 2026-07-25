@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,11 +8,40 @@ version = "0.4.0"
 description = "Hang-resistant Python harness for running and validating VBA in desktop Excel"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+# SPDX expression per PEP 639. Do not add a "License ::" classifier
+# alongside it; setuptools rejects the combination.
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "William Smith Edward" }]
+keywords = [
+    "excel", "vba", "automation", "com", "testing", "pytest",
+    "macro", "xlsm", "windows",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Spreadsheet",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "pywin32>=306; sys_platform == 'win32'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/WilliamSmithEdward/pyVBAharness"
+Repository = "https://github.com/WilliamSmithEdward/pyVBAharness"
+Issues = "https://github.com/WilliamSmithEdward/pyVBAharness/issues"
+Documentation = "https://github.com/WilliamSmithEdward/pyVBAharness#readme"
 
 [project.optional-dependencies]
 fuzz = [
@@ -21,7 +50,12 @@ fuzz = [
 dev = [
     "pytest>=8",
     "hypothesis>=6",
+    "build>=1",
+    "twine>=5",
 ]
+
+[project.scripts]
+pyvbaharness = "pyvbaharness.__main__:main"
 
 [project.entry-points.pytest11]
 pyvbaharness = "pyvbaharness.pytest_plugin"

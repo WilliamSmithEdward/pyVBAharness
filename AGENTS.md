@@ -46,6 +46,12 @@ order.
 - Live tests (real Excel): `python -m pytest tests/live -m live -o addopts=""`
 - Benchmarks: `python benchmarks/run_benchmarks.py --out benchmarks/output/<name>.json`
 - Pool scaling: `python benchmarks/run_pool_benchmarks.py --out benchmarks/output/<name>.json`
+- Releasing to PyPI: `docs/RELEASING.md`. The version lives in both
+  `pyproject.toml` and `src/pyvbaharness/__init__.py`; change them together
+  or `tests/unit/test_packaging.py` fails.
+- CI runs the unit suite on Windows only and cannot run the live suite:
+  hosted runners have no Excel. A green CI badge does not mean the harness
+  works, only that the pure logic is intact and the package builds.
 - How to change this codebase: `docs/IMPLEMENTATION_GUIDE.md` (read first).
 - Architecture and the measured Excel behaviors behind each decision:
   `docs/architecture.md`.

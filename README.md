@@ -61,8 +61,11 @@ environment.
 ## Install
 
 ```bash
-pip install -e .
+pip install pyvbaharness
 ```
+
+Optional extras: `pyvbaharness[fuzz]` adds Hypothesis for property-based
+testing. For development, clone and `pip install -e ".[dev,fuzz]"`.
 
 ## Running VBA
 
@@ -346,11 +349,13 @@ they do at run time.
 ## Command line
 
 ```bash
-python -m pyvbaharness doctor --live
-python -m pyvbaharness run My.bas --proc Main --arg 42
-python -m pyvbaharness check My.bas Other.cls
-python -m pyvbaharness check --workbook model.xlsm
+pyvbaharness doctor --live
+pyvbaharness run My.bas --proc Main --arg 42
+pyvbaharness check My.bas Other.cls
+pyvbaharness check --workbook model.xlsm
 ```
+
+`python -m pyvbaharness <command>` works identically.
 
 `doctor` checks Excel, pywin32, the VBA project trust setting, and the VBE
 error-trapping mode; "Break on All Errors" sends handled errors to the
@@ -457,6 +462,7 @@ Excel processes survive.
 | [Architecture](docs/architecture.md) | Process model, hang-resistance layers, design rationale |
 | [Troubleshooting](docs/troubleshooting.md) | What each failure means and what to do about it |
 | [Implementation guide](docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Excel behaviors |
+| [Releasing](docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
 
 ## License
 
