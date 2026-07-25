@@ -37,10 +37,10 @@ excel = ExcelSession(HarnessConfig(startup_timeout_s=120))
 
 ## "Another pyvbaharness session is running on this machine"
 
-Sessions take a machine-wide lock because Excel's automation surface is
-shared: two sessions contend over modal dialogs, VBE focus, and process
-cleanup, producing timeouts that look like code failures. Wait for the other
-session to finish.
+Sessions take a machine-wide lock so two independently started harnesses do
+not fight over Excel by accident. Wait for the other session to finish, or
+if you WANT concurrency, use `SessionPool`, which manages it deliberately
+(isolated members, serialized compile checks).
 
 If the lock is held by a session that crashed, the mutex is released by
 Windows automatically when that process dies. If the message persists, look
@@ -51,6 +51,16 @@ To wait rather than fail immediately:
 ```python
 ExcelSession(HarnessConfig(lock_wait_s=300))
 ```
+
+## Parallel runs are slower than expected
+
+Short tasks stop scaling around pool size 4 (measured: 2.3x at 4 members
+for ~120 ms tasks) because each run carries ~20 ms of fixed overhead that
+does not parallelize. Longer tasks scale closer to linearly. Also check
+memory: each member is a full Excel instance at 150-300 MB, and a machine
+that starts paging loses far more than parallelism gains. Compile checks
+serialize machine-wide by design; do not count them toward parallel
+throughput.
 
 ## Every run reports `modal-blocked` at the first VBA error
 

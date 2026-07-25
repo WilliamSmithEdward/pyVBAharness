@@ -24,12 +24,14 @@ from .results import (
     VbaError,
     WorkerProtocolError,
 )
+from .pool import SessionPool
 from .session import ExcelSession, HarnessConfig, run_vba
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "ExcelSession",
+    "SessionPool",
     "HarnessConfig",
     "run_vba",
     "add_line_numbers",

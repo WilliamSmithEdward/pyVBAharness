@@ -146,8 +146,11 @@ for case in results:
     print(case.name, "passed" if case.passed else case.result.error)
 ```
 
-If a test hangs, it reports `timeout`, the session recycles, and the
-remaining tests are listed as not run rather than silently dropped.
+If a test hangs, it reports `timeout`, the session recycles, the test module
+is reinjected, and the remaining tests still run; a hang costs one test, not
+the suite. (Only when recovery is impossible, for example `auto_recycle`
+disabled, is the remainder reported as not run rather than silently
+dropped.)
 
 ### Survive a hang
 
@@ -202,6 +205,39 @@ Code that calls `PyVbaLog` or the assert helpers needs
 `compile_project(include_harness_support=True)` so those names resolve the
 way they do during a run.
 
+### Run in parallel
+
+`SessionPool` runs work across several owned Excel instances at once. Each
+member is a full session (own Excel process, own watchdogs, own recovery);
+a hang costs that member one recycle while the others keep working.
+
+```python
+from pyvbaharness import SessionPool
+
+with SessionPool(4) as pool:
+    futures = [pool.run_vba(source, proc="Crunch", args=(n,))
+               for n in range(24)]
+    results = [f.result() for f in futures]
+
+    # Shard a VBA test suite across all members:
+    cases = pool.run_tests(suite_source, timeout=30)
+
+    # Or borrow a session for a multi-step flow:
+    future = pool.submit(lambda s: (
+        s.open_workbook(r"C:\data\model.xlsm"),
+        s.run_macro("Model.Recalculate", timeout=300),
+        s.read_range("Out", "A1:C10"),
+    )[-1])
+```
+
+Measured scaling on a 16-core machine with ~120 ms tasks
+(`benchmarks/output/pool-baseline-0.3.0.json`): 1.7x at 2 members, 2.3x at
+4, flat after that; longer-running tasks scale closer to linearly because
+the fixed ~20 ms per-run overhead amortizes. Budget 150-300 MB RAM per
+member. Compile checks stay serialized machine-wide even inside a pool (they
+drive the visible VBE, which is a genuinely shared surface); hidden runs and
+range IO parallelize cleanly.
+
 ### Command line
 
 ```bash
@@ -248,9 +284,10 @@ Dialogs are watched for continuously and handled by a conservative policy:
   you already have open. It verifies this at startup and refuses to run if
   the instance turns out to be pre-existing, because a timeout kills that
   process.
-- Only one harness session runs at a time per machine by default. Excel's UI
-  automation surface is shared, so concurrent sessions produce contention and
-  misleading timeouts.
+- Only one harness session runs at a time per machine by default; the lock
+  exists to stop accidental concurrency. Deliberate concurrency goes through
+  `SessionPool`, which isolates members per Excel process and keeps the one
+  genuinely shared operation (compile checks) serialized.
 - The owned Excel is placed in a kernel job object with kill-on-close: if
   the harness process dies for any reason, including being force-killed, the
   kernel terminates Excel with it. Manifest-based sweeps remain as backup,

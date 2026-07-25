@@ -1,0 +1,44 @@
+{
+  "version": "0.3.0",
+  "python": "3.14.6",
+  "cpu_count": 16,
+  "task_busy_seconds": 0.12,
+  "results": [
+    {
+      "pool_size": 1,
+      "startup_s": 0.482,
+      "tasks": 24,
+      "wall_s": 3.378,
+      "tasks_per_s": 7.1,
+      "failed": 0,
+      "speedup": 1.0
+    },
+    {
+      "pool_size": 2,
+      "startup_s": 0.839,
+      "tasks": 24,
+      "wall_s": 1.976,
+      "tasks_per_s": 12.15,
+      "failed": 0,
+      "speedup": 1.71
+    },
+    {
+      "pool_size": 4,
+      "startup_s": 1.375,
+      "tasks": 24,
+      "wall_s": 1.491,
+      "tasks_per_s": 16.09,
+      "failed": 0,
+      "speedup": 2.27
+    },
+    {
+      "pool_size": 6,
+      "startup_s": 2.026,
+      "tasks": 24,
+      "wall_s": 1.411,
+      "tasks_per_s": 17.01,
+      "failed": 0,
+      "speedup": 2.39
+    }
+  ]
+}

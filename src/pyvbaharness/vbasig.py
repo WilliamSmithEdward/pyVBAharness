@@ -177,3 +177,20 @@ def list_procedures(source: str) -> list[ProcedureSignature]:
         if signature is not None:
             found.append(signature)
     return found
+
+
+def discover_tests(source: str, prefix: str = "Test") -> list[str]:
+    """Names of zero-required-argument Subs/Functions matching the prefix.
+
+    Pure-Python test discovery, shared by ExcelSession.run_tests and
+    SessionPool sharding so both see the same test list without a COM round
+    trip.
+    """
+    wanted = prefix.lower()
+    return [
+        signature.name
+        for signature in list_procedures(source)
+        if signature.kind in (KIND_SUB, KIND_FUNCTION)
+        and signature.required == 0
+        and signature.name.lower().startswith(wanted)
+    ]

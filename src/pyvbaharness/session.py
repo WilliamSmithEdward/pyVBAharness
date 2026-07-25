@@ -32,9 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import codegen, protocol
+from . import codegen, protocol, vbasig
 from .numbering import instrument_error_lines
-from .lock import SessionLock
+from .lock import COMPILE_MUTEX_NAME, SessionLock
 from .oracle import OracleIssue, validate_session_trace
 from .process_control import (
     OwnedProcessManifest,
@@ -633,47 +633,77 @@ class ExcelSession:
 
     def run_tests(self, source: str | None = None,
                   module: str | None = None, prefix: str = "Test",
-                  timeout: float | None = None) -> list[TestCaseResult]:
+                  timeout: float | None = None,
+                  tests: list[str] | None = None) -> list[TestCaseResult]:
         """Discover and run VBA test procedures.
 
         Tests are zero-argument Subs or Functions whose names start with
         ``prefix``, either in ``source`` (injected as ``module``, default
-        PyVbaTests) or in an existing module. Inside tests, ``PyVbaAssert``
-        and ``PyVbaAssertEqual`` raise structured failures, and ``PyVbaLog``
-        output comes back per test.
+        PyVbaTests) or in an existing module. ``tests`` names an explicit
+        subset instead of prefix discovery (SessionPool sharding uses this).
+        Inside tests, ``PyVbaAssert`` and ``PyVbaAssertEqual`` raise
+        structured failures, and ``PyVbaLog`` output comes back per test.
 
-        If the session dies mid-suite (timeout or blocked modal), the
-        remaining tests are reported as runner-error "not run" rather than
-        silently dropped.
+        A hanging test costs that test, not the suite: when the session dies
+        (timeout or blocked modal) and ``source`` is available, the session
+        recycles, the module is reinjected, and the remaining tests still
+        run. Without ``source`` to reinject, the remainder is reported as
+        runner-error "not run" rather than silently dropped.
         """
         if source is not None:
             module = module or "PyVbaTests"
-            if not self._workbook_known():
-                self.new_workbook()
-            self.add_module(module, source, line_numbers=True)
+            self._install_test_source(module, source)
+            available = vbasig.discover_tests(source, prefix="")
         elif module is None:
             raise ValueError("run_tests needs source or a module name")
-        wanted = prefix.lower()
-        procs = [
-            p["name"] for p in self.list_procedures(module)
-            if p["name"].lower().startswith(wanted)
-            and p["kind"] in ("sub", "function")
-            and p["required"] == 0
-        ]
+        else:
+            available = [
+                p["name"] for p in self.list_procedures(module)
+                if p["kind"] in ("sub", "function") and p["required"] == 0
+            ]
+        if tests is None:
+            wanted = prefix.lower()
+            selected = [n for n in available
+                        if n.lower().startswith(wanted)]
+        else:
+            lookup = {n.lower(): n for n in available}
+            missing = [t for t in tests if t.lower() not in lookup]
+            if missing:
+                raise ValueError(
+                    f"Unknown test procedure(s): {', '.join(missing)}")
+            selected = [lookup[t.lower()] for t in tests]
+
         results: list[TestCaseResult] = []
-        for index, name in enumerate(procs):
+        for index, name in enumerate(selected):
             run = self.run_macro(f"{module}.{name}", timeout=timeout)
             results.append(TestCaseResult(name=name, result=run))
-            if run.outcome in (TIMEOUT, MODAL_BLOCKED, RUNNER_ERROR):
-                for skipped in procs[index + 1:]:
-                    results.append(TestCaseResult(
-                        name=skipped,
-                        result=RunResult(
-                            outcome=RUNNER_ERROR, duration_s=0.0,
-                            message=f"Not run: the session died on {name} "
-                                    f"({run.outcome}).")))
-                break
+            if run.outcome not in (TIMEOUT, MODAL_BLOCKED, RUNNER_ERROR):
+                continue
+            if run.outcome == RUNNER_ERROR and not self._dead:
+                # An isolated harness-level failure with a healthy session
+                # (for example a target that stopped existing) does not end
+                # the suite.
+                continue
+            if source is not None:
+                try:
+                    self._install_test_source(module, source)
+                    continue  # recovered: keep running the remaining tests
+                except (HarnessError, SessionDead):
+                    pass
+            for skipped in selected[index + 1:]:
+                results.append(TestCaseResult(
+                    name=skipped,
+                    result=RunResult(
+                        outcome=RUNNER_ERROR, duration_s=0.0,
+                        message=f"Not run: the session died on {name} "
+                                f"({run.outcome}).")))
+            break
         return results
+
+    def _install_test_source(self, module: str, source: str) -> None:
+        if not self._workbook_known():
+            self.new_workbook()
+        self.add_module(module, source, line_numbers=True)
 
     def save_trace(self, path: str | Path) -> Path:
         """Write the session's event trace as JSON lines for postmortems."""
@@ -708,6 +738,11 @@ class ExcelSession:
             protocol.CMD_RUN_RAW, {"target": target, "args": list(args)},
             timeout))
         return data.get("value")
+
+    @property
+    def is_dead(self) -> bool:
+        """True while the session has no live worker (recycle pending)."""
+        return self._dead
 
     @property
     def excel_pid(self) -> int:
@@ -752,14 +787,26 @@ class ExcelSession:
         first, so code that calls PyVbaLog or the assert helpers compiles the
         way it will actually run. Leave it False to check a workbook exactly
         as-is.
+
+        Compile checks are serialized machine-wide (dedicated mutex), even
+        for pool sessions: they drive the visible VBE, which is a genuinely
+        shared UI surface. Hidden runs in other sessions continue in
+        parallel.
         """
         watch = watch_seconds or self.config.compile_watch_s
         started = time.monotonic()
-        payload = self._command(
-            protocol.CMD_COMPILE,
-            {"watch_seconds": watch,
-             "include_support": include_harness_support},
-            watch + 30.0)
+        compile_lock = SessionLock(timeout_s=watch + 120.0,
+                                   name=COMPILE_MUTEX_NAME,
+                                   purpose="compile")
+        compile_lock.acquire()
+        try:
+            payload = self._command(
+                protocol.CMD_COMPILE,
+                {"watch_seconds": watch,
+                 "include_support": include_harness_support},
+                watch + 30.0)
+        finally:
+            compile_lock.release()
         duration = time.monotonic() - started
         outcome = payload.get("outcome")
         if outcome == PASSED:

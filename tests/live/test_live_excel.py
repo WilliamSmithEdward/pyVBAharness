@@ -273,22 +273,25 @@ End Sub
         assert not erroring.is_assertion_failure
         assert erroring.result.error.number == 91
 
-    def test_session_death_marks_remaining_not_run(self, session):
+    def test_hanging_test_recovers_and_suite_continues(self, session):
+        """A hang costs one test, not the suite: the session recycles,
+        reinjects the module, and the remaining tests really run."""
         suite = """
 Public Sub TestHangs()
     Do
     Loop
 End Sub
 
-Public Sub TestNeverRuns()
+Public Sub TestStillRuns()
+    PyVbaLog "made it"
 End Sub
 """
         session.new_workbook()
         results = session.run_tests(suite, timeout=6.0)
-        assert [r.name for r in results] == ["TestHangs", "TestNeverRuns"]
+        assert [r.name for r in results] == ["TestHangs", "TestStillRuns"]
         assert results[0].result.outcome == TIMEOUT
-        assert results[1].result.outcome == RUNNER_ERROR
-        assert "Not run" in results[1].result.message
+        assert results[1].result.outcome == PASSED
+        assert results[1].result.output == ["made it"]
 
 
 class TestRangesAndFiles:

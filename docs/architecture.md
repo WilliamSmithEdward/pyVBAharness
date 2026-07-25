@@ -244,6 +244,43 @@ it, teardown checks reported a dead Excel as alive.
 - Cheap protocol. Newline-delimited JSON on pipes, UTF-8 forced on both ends;
   no polling loops on the supervisor side except armed timers.
 
+## Parallel execution (SessionPool)
+
+Parallelism is per-Excel-instance: `SessionPool` owns N full ExcelSessions,
+each with its own worker process, its own new EXCEL.EXE, its own watcher,
+manifest, and job object. A ThreadPoolExecutor with one thread per member
+checks a session out to exactly one task at a time, which preserves the
+sessions' single-caller contract without any locking inside the session.
+
+The default machine-wide session mutex exists to stop ACCIDENTAL
+concurrency; pool members run `exclusive=False` because the pool is
+deliberate concurrency with the hazards addressed head-on:
+
+- Dialogs cannot cross-talk: the watcher enumerates windows by owned PID and
+  dismisses via SendMessage directly to button handles, never via focus or
+  keystrokes.
+- Compile checks stay serialized machine-wide through a dedicated mutex
+  inside `compile_project` (pool or not): they make Excel and the VBE
+  visible and drive the VBE command bar, a genuinely shared UI surface -
+  the original single-user-surface warning from the XLIDE oracle README
+  applies to exactly this operation.
+- A hang costs one member one recycle (`auto_recycle` is forced on);
+  in-flight work on other members is unaffected, proven live by wall-clock
+  overlap tests.
+
+`pool.run_tests` shards a suite by round-robin over pure-Python discovery
+(`vbasig.discover_tests`), each member injects the same module and runs its
+slice, and results merge back in discovery order. Session-level
+`run_tests` recovery (recycle, reinject, continue) makes a hanging test
+cost one test rather than one shard.
+
+Measured scaling (16 cores, ~120 ms busy tasks, 24 tasks,
+pool-baseline-0.3.0.json): 7.1 tasks/s at size 1, 12.2 at 2 (1.71x), 16.1
+at 4 (2.27x), 17.0 at 6 (2.39x). The knee sits near 4 for short tasks: the
+fixed ~20 ms per-run harness overhead and the supervisor's Python-side work
+stop amortizing. Longer tasks scale closer to linearly. Startup is
+concurrent (0.8 s for 2 members, 2.0 s for 6, warm).
+
 ## VBE object model use
 
 Module injection uses `Workbook.VBProject.VBComponents` (`AddFromString`),
@@ -285,9 +322,10 @@ by the supervisor cleanup watchdog.
 
 ```text
 src/pyvbaharness/
-  __init__.py         public API (ExcelSession, run_vba, results)
+  __init__.py         public API (ExcelSession, SessionPool, run_vba, results)
   __main__.py         CLI: doctor / run / check
   session.py          supervisor: worker lifecycle, watchdogs, abort path
+  pool.py             SessionPool: N sessions, work queue, sharded run_tests
   protocol.py         command/event types and JSON codec
   results.py          RunResult, CompileResult, TestCaseResult, outcomes
   codegen.py          support-module and per-target dispatcher generation
@@ -301,8 +339,8 @@ src/pyvbaharness/
   worker/__main__.py  worker entry point (stdin commands -> stdout events)
   worker/excel_host.py  all Excel COM calls
   worker/watcher.py   ctypes window scanner + dismissal executor
-tests/unit            pure logic, no Excel required (111 tests)
-tests/live            real Excel, opt-in via -m live (32 tests)
+tests/unit            pure logic, no Excel required (125 tests)
+tests/live            real Excel, opt-in via -m live (38 tests)
 benchmarks/           startup and per-run overhead measurements
 ```
 
@@ -331,11 +369,15 @@ wedge above was traced to the `Value2` assignment rather than guessed at.
 - A target returning an object fails at the dispatcher's Variant assignment
   and is reported as a vba-error. Return scalars or arrays, or write to
   cells.
-- One session per machine by default (lock). Parallelism against one Excel
-  install is out of contract, matching the references.
+- One session per machine by default (lock); deliberate parallelism goes
+  through SessionPool, which opts members out and keeps compile checks
+  serialized. Concurrent calls on one session object remain out of contract
+  (the pool enforces one task per member).
 - No warm-spare Excel pool. A pre-spawned spare would make recycle-after-hang
   nearly instant (0.5-3 s today), but its event stream would interleave into
   the session trace mid-generation and it complicates the abort path, the
-  most safety-critical code in the harness. Declined until a real workload
-  shows recycle latency to be the bottleneck; the design note is here so the
-  tradeoff is not re-derived from scratch.
+  most safety-critical code in the harness. SessionPool reduces the pain a
+  different way: while one member recycles, the others keep serving.
+  Declined until a real workload shows recycle latency itself to be the
+  bottleneck; the design note is here so the tradeoff is not re-derived
+  from scratch.

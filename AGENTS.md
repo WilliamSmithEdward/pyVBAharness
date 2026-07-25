@@ -25,6 +25,7 @@ order.
 - Unit tests (no Excel): `python -m pytest tests/unit`
 - Live tests (real Excel): `python -m pytest tests/live -m live -o addopts=""`
 - Benchmarks: `python benchmarks/run_benchmarks.py --out benchmarks/output/<name>.json`
+- Pool scaling: `python benchmarks/run_pool_benchmarks.py --out benchmarks/output/<name>.json`
 - Architecture and the measured Excel behaviors behind each decision:
   `docs/architecture.md`.
 - Excel's "Trust access to the VBA project object model" must be enabled.
@@ -53,6 +54,10 @@ change:
 - Dialogs offering a real choice are never dismissed by guessing.
 - All COM lives in the worker process; the supervisor and the dialog watcher
   stay COM-free.
+- Compile checks serialize machine-wide (dedicated mutex in
+  compile_project): they drive the visible VBE, a shared UI surface. Pool
+  members parallelize everything else; one session object serves one task
+  at a time (SessionPool enforces this by checkout).
 - Workbooks open read-only by default and close without saving unless an
   explicit save ran.
 

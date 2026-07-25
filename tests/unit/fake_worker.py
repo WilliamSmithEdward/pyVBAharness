@@ -45,10 +45,12 @@ def main():
                  data={"name": "FakeBook"}, duration_ms=1)
             continue
         if name == "run":
+            # Behaviors keyed by substring so tests can use natural names
+            # ("Hang.Forever", "PyVbaTests.TestHangOne", ...).
             target = params.get("target", "")
-            if target == "Hang.Forever":
+            if "Hang" in target:
                 time.sleep(600)  # never answers; the supervisor must kill us
-            elif target == "Modal.Blocked":
+            elif "Modal" in target:
                 emit("modal-blocked", title="Microsoft Excel",
                      message="Overwrite?", texts=["Overwrite?"],
                      buttons=["Yes", "No"], button_ids=[6, 7],
@@ -56,8 +58,13 @@ def main():
                      reason="decision-or-unknown-dialog",
                      action="blocked:decision-or-unknown-dialog")
                 time.sleep(600)  # stuck behind the modal
-            elif target == "Die.Now":
+            elif "Die" in target:
                 sys.exit(3)
+            elif "Slow" in target:
+                time.sleep(1.0)
+                emit("command-finished", cid=cid, command=name,
+                     outcome="passed", value="slow", output=[],
+                     duration_ms=1000)
             else:
                 emit("command-finished", cid=cid, command=name,
                      outcome="passed", value=42, output=["hi"],
