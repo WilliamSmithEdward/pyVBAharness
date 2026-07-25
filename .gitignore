@@ -1,0 +1,30 @@
+# Local agent configuration
+.claude/
+
+# Python environments, caches, and packages
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.egg-info/
+build/
+dist/
+
+# Test and benchmark working output (versioned baselines are tracked)
+tests/output/
+benchmarks/output/*.tmp.json
+
+# Microsoft Office lock and recovery files
+~$*
+*.xlk
+*.asd
+
+# Editor and operating-system metadata
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

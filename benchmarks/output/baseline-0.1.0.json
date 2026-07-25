@@ -1,0 +1,52 @@
+{
+  "version": "0.1.0",
+  "python": "3.14.6",
+  "results": {
+    "session_startup": {
+      "median_s": 2.7624,
+      "min_s": 2.7322,
+      "max_s": 2.8889,
+      "samples": 3
+    },
+    "first_run": {
+      "median_s": 0.146,
+      "samples": 1
+    },
+    "warm_run": {
+      "median_s": 0.0191,
+      "min_s": 0.018,
+      "max_s": 0.0196,
+      "samples": 5
+    },
+    "run_with_args": {
+      "median_s": 0.0196,
+      "min_s": 0.0182,
+      "max_s": 0.0878,
+      "samples": 5
+    },
+    "retarget_run": {
+      "median_s": 0.0921,
+      "min_s": 0.0892,
+      "max_s": 0.0932,
+      "samples": 5
+    },
+    "write_10k_cells": {
+      "median_s": 0.0725,
+      "min_s": 0.0712,
+      "max_s": 0.1181,
+      "samples": 3
+    },
+    "read_10k_cells": {
+      "median_s": 0.0097,
+      "min_s": 0.0096,
+      "max_s": 0.0232,
+      "samples": 3
+    },
+    "compile_accept": {
+      "median_s": 6.1425,
+      "min_s": 6.1425,
+      "max_s": 6.1425,
+      "samples": 1
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "version": "0.2.0",
+  "python": "3.14.6",
+  "results": {
+    "session_startup": {
+      "median_s": 0.4557,
+      "min_s": 0.4523,
+      "max_s": 0.4703,
+      "samples": 3
+    },
+    "first_run": {
+      "median_s": 0.1187,
+      "samples": 1
+    },
+    "warm_run": {
+      "median_s": 0.0152,
+      "min_s": 0.015,
+      "max_s": 0.0157,
+      "samples": 5
+    },
+    "run_vba_cached": {
+      "median_s": 0.0202,
+      "min_s": 0.0199,
+      "max_s": 0.1184,
+      "samples": 5
+    },
+    "run_with_args": {
+      "median_s": 0.0157,
+      "min_s": 0.0149,
+      "max_s": 0.0761,
+      "samples": 5
+    },
+    "retarget_run": {
+      "median_s": 0.0755,
+      "min_s": 0.073,
+      "max_s": 0.0766,
+      "samples": 5
+    },
+    "write_10k_cells": {
+      "median_s": 0.0665,
+      "min_s": 0.0624,
+      "max_s": 0.1104,
+      "samples": 3
+    },
+    "read_10k_cells": {
+      "median_s": 0.0092,
+      "min_s": 0.009,
+      "max_s": 0.0217,
+      "samples": 3
+    },
+    "compile_accept": {
+      "median_s": 0.9763,
+      "min_s": 0.9763,
+      "max_s": 0.9763,
+      "samples": 1
+    }
+  }
+}
