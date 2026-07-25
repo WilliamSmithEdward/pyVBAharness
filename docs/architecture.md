@@ -316,11 +316,12 @@ slice, and results merge back in discovery order. Session-level
 cost one test rather than one shard.
 
 Measured scaling (16 cores, ~120 ms busy tasks, 24 tasks,
-pool-baseline-0.3.0.json): 7.1 tasks/s at size 1, 12.2 at 2 (1.71x), 16.1
-at 4 (2.27x), 17.0 at 6 (2.39x). The knee sits near 4 for short tasks: the
-fixed ~20 ms per-run harness overhead and the supervisor's Python-side work
-stop amortizing. Longer tasks scale closer to linearly. Startup is
-concurrent (0.8 s for 2 members, 2.0 s for 6, warm).
+pool-baseline-0.4.0.json): 8.2 tasks/s at size 1, 15.9 at 2 (1.94x), 27.8
+at 4 (3.38x), 34.9 at 6 (4.26x). Scaling improved materially against the
+0.3.0 baseline (1.71x / 2.27x / 2.39x) because the signature cache cut
+per-run harness overhead from ~20 ms to 0.6 ms, leaving far less serial
+work per task. Startup is concurrent (0.8 s for 2 members, 2.0 s for 6,
+warm).
 
 ## VBE object model use
 
