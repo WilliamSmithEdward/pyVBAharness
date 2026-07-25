@@ -344,19 +344,19 @@ of these behaviors appear only in specific orders.
 ## 9. Performance notes
 
 Current measured costs (Excel 365 x64, Python 3.14,
-`benchmarks/output/baseline-0.4.0.json`):
+`benchmarks/output/baseline-1.0.0.json`):
 
 | Operation | Cost |
 | --- | --- |
 | Session startup and teardown | 0.5 s warm |
-| Warm run, same target | 0.6 ms |
-| Run with arguments | 1.4 ms |
-| `run_vba` with identical source (cache hit) | 1.9 ms |
-| Retarget (dispatcher regenerated) | 97 ms |
-| Batch, 1000 calls | 0.107 ms per call (7.5x) |
-| Compile check, clean project | 1.2 s |
-| Write 10,000 cells | 71 ms |
-| Read 10,000 cells | 10 ms |
+| Warm run, same target | 0.5 ms |
+| Run with arguments | 0.7 ms |
+| `run_vba` with identical source (cache hit) | 0.9 ms |
+| Retarget (dispatcher regenerated) | 76 ms |
+| Batch, 1000 calls | 0.094 ms per call (6.5x) |
+| Compile check, clean project | 1.0 s |
+| Write 10,000 cells | 63 ms |
+| Read 10,000 cells | 9 ms |
 
 Where the speed comes from, so you do not accidentally remove it:
 

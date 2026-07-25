@@ -321,8 +321,8 @@ with SessionPool(4) as pool:
     )[-1])
 ```
 
-Throughput on a 16-core machine with 120 ms tasks: 1.9x at two members, 3.4x
-at four, 4.3x at six (`benchmarks/output/pool-baseline-0.4.0.json`). Each
+Throughput on a 16-core machine with 120 ms tasks: 2.0x at two members, 3.6x
+at four, 4.7x at six (`benchmarks/output/pool-baseline-1.0.0.json`). Each
 member uses 150 to 300 MB of RAM. Compile checks remain serialized
 machine-wide inside a pool because they drive the visible VBE, which is a
 shared surface; hidden runs and range IO do not interfere with each other.
@@ -420,19 +420,19 @@ workbook. Workbook-qualified targets are rejected before any COM call.
 ## Performance
 
 Measured on Excel 365 x64 with Python 3.14
-(`benchmarks/output/baseline-0.4.0.json`):
+(`benchmarks/output/baseline-1.0.0.json`):
 
 | Operation | Median |
 | --- | --- |
 | Session startup and teardown | 0.5 s warm, ~3 s cold |
-| Run a procedure, same target as previous call | 0.6 ms |
-| Run a procedure with arguments | 1.4 ms |
-| `run_vba` with unchanged source | 1.9 ms |
-| Run a different target (dispatcher regenerated) | 97 ms |
-| Batched calls, 1000 per batch | 0.107 ms each |
-| Compile check, clean project | 1.2 s |
-| Write 10,000 cells | 71 ms |
-| Read 10,000 cells | 10 ms |
+| Run a procedure, same target as previous call | 0.5 ms |
+| Run a procedure with arguments | 0.7 ms |
+| `run_vba` with unchanged source | 0.9 ms |
+| Run a different target (dispatcher regenerated) | 76 ms |
+| Batched calls, 1000 per batch | 0.094 ms each |
+| Compile check, clean project | 1.0 s |
+| Write 10,000 cells | 63 ms |
+| Read 10,000 cells | 9 ms |
 
 Per-run cost depends on three caches: resolved target signatures, injected
 source, and the generated dispatcher. Repeated calls to the same target with

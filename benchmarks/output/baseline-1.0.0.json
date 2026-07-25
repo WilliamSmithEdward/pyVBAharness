@@ -1,0 +1,74 @@
+{
+  "version": "1.0.0",
+  "python": "3.14.6",
+  "results": {
+    "session_startup": {
+      "median_s": 0.4957,
+      "min_s": 0.4912,
+      "max_s": 2.8021,
+      "samples": 3
+    },
+    "first_run": {
+      "median_s": 0.1286,
+      "samples": 1
+    },
+    "warm_run": {
+      "median_s": 0.0005,
+      "min_s": 0.0005,
+      "max_s": 0.0168,
+      "samples": 5
+    },
+    "run_vba_cached": {
+      "median_s": 0.0009,
+      "min_s": 0.0006,
+      "max_s": 0.1291,
+      "samples": 5
+    },
+    "run_with_args": {
+      "median_s": 0.0007,
+      "min_s": 0.0005,
+      "max_s": 0.0809,
+      "samples": 5
+    },
+    "retarget_run": {
+      "median_s": 0.0764,
+      "min_s": 0.076,
+      "max_s": 0.0775,
+      "samples": 5
+    },
+    "write_10k_cells": {
+      "median_s": 0.0631,
+      "min_s": 0.0624,
+      "max_s": 0.114,
+      "samples": 3
+    },
+    "read_10k_cells": {
+      "median_s": 0.0087,
+      "min_s": 0.0084,
+      "max_s": 0.0089,
+      "samples": 3
+    },
+    "compile_accept": {
+      "median_s": 1.01,
+      "min_s": 1.01,
+      "max_s": 1.01,
+      "samples": 1
+    },
+    "batch_200_calls": {
+      "serial_s": 0.2114,
+      "serial_ms_per_call": 1.057,
+      "batch_s": 0.0875,
+      "batch_ms_per_call": 0.437,
+      "speedup": 2.42,
+      "failed": 0
+    },
+    "batch_1000_calls": {
+      "serial_s": 0.6116,
+      "serial_ms_per_call": 0.612,
+      "batch_s": 0.0938,
+      "batch_ms_per_call": 0.094,
+      "speedup": 6.52,
+      "failed": 0
+    }
+  }
+}

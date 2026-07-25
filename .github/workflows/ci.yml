@@ -104,6 +104,10 @@ jobs:
             throw "console script exited $LASTEXITCODE"
           }
           Write-Output "Wheel installs, imports, and exposes its CLI"
+          # doctor's tolerated exit 2 is still sitting in $LASTEXITCODE, and
+          # the pwsh step wrapper exits with whatever it finds there. Clear
+          # it explicitly or the step fails after reporting success.
+          exit 0
 
       - uses: actions/upload-artifact@v4
         with:
