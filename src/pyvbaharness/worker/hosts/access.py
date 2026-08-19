@@ -41,6 +41,10 @@ class AccessHost(OfficeHost):
         super().__init__()
         self._run_dispid: int | None = None
         self._scratch_dir: str = ""
+        # True when this session created the database, and so owns every
+        # component in it. False for a database the caller opened, whose
+        # own modules must survive teardown untouched.
+        self._own_database = False
 
     # ----- lifecycle -------------------------------------------------------
 
@@ -95,7 +99,7 @@ class AccessHost(OfficeHost):
         self._scratch_dir = tempfile.mkdtemp(prefix="pyvbaharness-access-")
         path = str(Path(self._scratch_dir) / "harness.accdb")
         self.app.NewCurrentDatabase(path)
-        self._open_finished()
+        self._open_finished(owned=True)
         return {"name": self._document_name(), "path": path, "unsaved": False}
 
     @_wrap_com("open database")
@@ -115,7 +119,7 @@ class AccessHost(OfficeHost):
                 f"{path!r}, ideally against a copy.")
         self.close_document()
         self.app.OpenCurrentDatabase(path)
-        self._open_finished()
+        self._open_finished(owned=False)
         return {
             "name": self._document_name(),
             "path": str(self.app.CurrentProject.FullName),
@@ -123,9 +127,10 @@ class AccessHost(OfficeHost):
             "display_alerts": False,
         }
 
-    def _open_finished(self) -> None:
+    def _open_finished(self, owned: bool) -> None:
         self.document = self.app.CurrentProject
         self._reset_injection_state()
+        self._own_database = owned
         # Now that a database exists, this call is available and turns off
         # the action-query and object-delete confirmations.
         self._resuppress_alerts()
@@ -161,16 +166,25 @@ class AccessHost(OfficeHost):
         self._reset_injection_state()
 
     def _discard_injected_modules(self) -> None:
-        """Remove exactly the components this session added.
+        """Remove the unsaved components that would otherwise prompt.
 
-        Scoped to what the harness injected, never the whole project: an
-        opened database's own modules belong to the caller.
+        In a scratch database the harness created, that is every component:
+        tracking only what was injected through ``add_module`` leaves a
+        module created some other way (VBA reaching into the VBE, for
+        instance) behind, and one is enough to raise the prompt. In a
+        database the caller opened, only what this session injected is
+        removed, because everything else belongs to them.
         """
         try:
             components = self._components()
         except com_error:
             return
-        for name in sorted(self._injected):
+        if self._own_database:
+            names = [str(components.Item(i).Name)
+                     for i in range(1, int(components.Count) + 1)]
+        else:
+            names = sorted(self._injected)
+        for name in names:
             try:
                 component = self._find_component(components, name)
                 if component is not None:

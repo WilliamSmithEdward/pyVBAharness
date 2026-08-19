@@ -46,8 +46,23 @@ accidental release.
    `tests/unit/test_packaging.py` fails if they drift, and the publish
    workflow refuses to build when the release tag disagrees with them.
 
-2. Run the full local validation, including the live suite. Hosted runners
-   have no Excel installation, so CI cannot do this for you:
+2. Install the working tree as editable first, and check that it is what
+   gets imported:
+
+   ```powershell
+   python -m pip install -e ".[dev,fuzz]"
+   python -c "import pyvbaharness; print(pyvbaharness.__file__)"
+   ```
+
+   This is not optional housekeeping. The package registers a `pytest11`
+   entry point, so pytest imports `pyvbaharness` from site-packages at
+   startup, before `tests/conftest.py` can put `src` on the path. With a
+   non-editable install of a previous version present, the suite silently
+   tests the installed package instead of the working tree, and a fix under
+   test appears not to work. The path printed above must be inside `src`.
+
+3. Run the full local validation, including the live suite. Hosted runners
+   have no Office installation, so CI cannot do this for you:
 
    ```powershell
    python -m pytest tests/unit -q
@@ -65,7 +80,7 @@ accidental release.
    opens PowerPoint on screen because PowerPoint cannot be hidden. Run it in
    the foreground; the whole suite takes 4 to 5 minutes.
 
-3. Refresh the benchmark baselines if anything touched the run path, and
+4. Refresh the benchmark baselines if anything touched the run path, and
    update the numbers quoted in the README:
 
    ```powershell
@@ -73,7 +88,7 @@ accidental release.
    python benchmarks/run_pool_benchmarks.py --out benchmarks/output/pool-baseline-<version>.json
    ```
 
-4. Commit, then dry-run the build: Actions > Publish > Run workflow. A
+5. Commit, then dry-run the build: Actions > Publish > Run workflow. A
    manual run stops after the build job without publishing anything, and
    leaves the distributions as a downloadable artifact.
 
@@ -90,7 +105,7 @@ accidental release.
    byte-identical to what a release would upload, and it can be exercised
    against real Excel, which no hosted index or runner can do.
 
-5. Tag and publish. Creating the GitHub release triggers the real publish:
+6. Tag and publish. Creating the GitHub release triggers the real publish:
 
    ```powershell
    git tag v<version>
@@ -115,7 +130,7 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 ## Limits worth knowing
 
 CI cannot validate against real Office. Hosted runners have no Office
-installation, so the 117 live tests, which are the ones that actually prove
+installation, so the 120 live tests, which are the ones that actually prove
 the harness works, only ever run on a developer machine. Treat a green CI
 badge as "the pure logic is intact and the package builds", not as "the
 harness works".

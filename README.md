@@ -530,7 +530,7 @@ dispatcher, which accounts for the 77 ms figure.
 
 ```bash
 python -m pytest tests/unit                          # 176 tests, no Office
-python -m pytest tests/live -m live -o addopts=""    # 117 tests, real Office
+python -m pytest tests/live -m live -o addopts=""    # 120 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
 ```

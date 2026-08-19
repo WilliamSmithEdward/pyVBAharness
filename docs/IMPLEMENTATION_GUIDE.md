@@ -267,11 +267,39 @@ A module added through the VBE is unsaved, and Access raises a modal
 prompt blocked `Quit` outright during development and left Access wedged
 with no way in. `AccessHost.close_document` deletes the components the
 session injected before calling `CloseCurrentDatabase`, so the prompt never
-exists. Prevention is the pattern to reach for first here: the dialog has no
-Win32 buttons, so a watcher could report it but never dismiss it.
+exists.
 
-The removal is scoped to `self._injected`, never the whole project, because
-an opened database's own modules belong to the caller.
+Scope depends on who owns the database. In a scratch database the harness
+created, every component is removed: tracking only what went through
+`add_module` leaves behind a module created some other way, such as VBA
+reaching into the VBE, and one is enough to raise the prompt. In a database
+the caller opened, only what this session injected is removed, because
+everything else is theirs.
+
+The prompt is an ordinary `#32770` titled "Save As", with a Module Name
+field and OK/Cancel (measured 2026-08-19), so the watcher can read it and
+the dismissal policy correctly refuses to answer a question only the caller
+can. That only helps while the watcher is running, which is the next entry.
+
+### 3.19 Teardown is where Office prompts, so teardown must be watched
+
+`Worker.shutdown` used to stop the dialog watcher as its first act, then
+close the document and quit. That disarmed the harness at precisely the
+moment Office is most likely to prompt, because "do you want to save?" is a
+close-time question. A prompt raised during teardown was invisible: no
+modal-blocked event, nothing in the trace, and the session recovered only
+when the supervisor's cleanup deadline expired. Measured 2026-08-19 against
+an Access database holding an untracked module, that read as a 15.1 second
+hang for something already decided.
+
+The watcher is now stopped after `release()`, and the supervisor treats a
+modal-blocked event during its shutdown drain as a reason to stop waiting
+and kill at once. The same case now names the dialog and tears down in
+0.33 s. Where prevention also applies, as in a scratch database, the prompt
+never appears and the close is clean in about 2.5 s.
+
+The general rule: a watchdog that exists to observe the host must outlive
+the operations most likely to need observing. Shut it down last.
 
 ### 3.18 Access ordering: SetWarnings needs a database
 
@@ -330,6 +358,8 @@ OS or the object model will tell you about exactly over a sampled guess:
   out the dialog window.
 - The watcher suppresses its generic modal check while a dialog it clicked
   is still a valid window, rather than for a fixed settle interval.
+- The watcher runs until after COM is released, so a prompt raised while
+  closing is reported rather than waited out.
 
 A deadline is the backstop, not the mechanism. It exists because a COM call
 into a blocked apartment cannot be interrupted from inside, which is the one
@@ -422,6 +452,21 @@ rather than taking a line of its own. The transformer is deliberately
 conservative: when unsure, leave the line alone, which only costs precision.
 
 ## 7. Testing strategy
+
+Before trusting any test result, confirm which copy of the package is under
+test:
+
+```powershell
+python -c "import pyvbaharness; print(pyvbaharness.__file__)"
+```
+
+It must print a path inside `src`. The package registers a `pytest11` entry
+point, so pytest imports `pyvbaharness` from site-packages at startup,
+before `tests/conftest.py` can prepend `src` to `sys.path`. If a
+non-editable install is present, the suite tests that instead of the working
+tree: a fix appears to do nothing, and the same reproduction run as a plain
+script (which does control `sys.path`) behaves differently. `pip install -e .`
+makes the two the same thing. This cost real time on 2026-08-19.
 
 **Unit tests (`tests/unit`, no Excel).** Everything pure: dialog policy,
 oracle traces, signature parsing, codegen shape, chunk planning,

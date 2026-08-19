@@ -299,7 +299,12 @@ class OfficeSession:
                     grace = self.config.cleanup_grace_s
                     deadline = time.monotonic() + grace + 10.0
                     exited = self._drain_until_exit(deadline)
-                    if not exited:
+                    if exited is None:
+                        # A prompt the harness must not answer came up while
+                        # closing. Waiting out the deadline would add ten
+                        # silent seconds to something already decided.
+                        self._abort(MODAL_BLOCKED)
+                    elif not exited:
                         self._abort("cleanup-failed")
                 self._dead = True
         finally:
@@ -379,7 +384,9 @@ class OfficeSession:
             "at": time.time(),
         })
 
-    def _drain_until_exit(self, deadline: float) -> bool:
+    def _drain_until_exit(self, deadline: float) -> bool | None:
+        """True once the worker exits, False on the deadline, None when a
+        modal blocked the teardown."""
         while True:
             item = self._next_item(deadline)
             if item is None:
@@ -389,6 +396,8 @@ class OfficeSession:
                 return True
             if kind == "event":
                 self._ingest(payload)
+                if payload.get("kind") == protocol.EV_MODAL_BLOCKED:
+                    return None
 
     def recycle(self) -> None:
         """Kill whatever remains and start a fresh worker + application.

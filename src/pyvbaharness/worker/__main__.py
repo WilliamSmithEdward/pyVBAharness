@@ -154,9 +154,17 @@ class Worker:
         _emit(protocol.EV_READY, {"pid": self.host.pid})
 
     def shutdown(self) -> None:
+        """Close the document and quit, with the watcher still running.
+
+        The watcher used to be stopped first, which blinded the harness at
+        exactly the moment Office is most likely to prompt: closing a
+        document is what raises "do you want to save?". A prompt there went
+        unseen, and the session only recovered when the supervisor's cleanup
+        deadline expired, which reads as a 15 second hang. It is stopped at
+        the end instead, so a teardown dialog is captured and reported like
+        any other.
+        """
         watcher = self.watcher
-        if watcher is not None:
-            watcher.stop()
         if self.progress_tail is not None:
             self.progress_tail.stop()
         try:
@@ -187,6 +195,8 @@ class Worker:
                                       "message": str(err)})
         self.host.release()
         _emit(protocol.EV_PHASE, {"phase": "com-release", "outcome": "passed"})
+        if watcher is not None:
+            watcher.stop()
 
     # ----- command execution ----------------------------------------------
 

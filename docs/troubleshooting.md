@@ -139,6 +139,19 @@ What this means in practice:
 
 Excel, Word and Access have none of these limits.
 
+## Teardown reports a "Save As" dialog
+
+Closing raised a prompt the harness must not answer for you, so it killed
+the host instead of waiting. The dialog is named in the trace and in the
+`modal-blocked` event.
+
+For Access this usually means a VBA module exists that the session did not
+inject, in a database it did not create. The harness removes only its own
+components from a database you opened, because the rest are yours, and any
+unsaved module makes Access ask where to save it. Remove the stray module,
+or work in a scratch database from `new_document()`, where the harness owns
+everything and discards it all at close.
+
 ## Access refuses `read_only=True`
 
 Injecting VBA into an Access database writes to the file immediately, not at

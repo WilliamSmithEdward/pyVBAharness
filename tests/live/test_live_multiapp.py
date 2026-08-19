@@ -78,6 +78,34 @@ def _waited_for_exit(pid: int, timeout_s: float = 20.0) -> bool:
     return not is_process_alive(pid)
 
 
+def _make_database(path) -> None:
+    """Create an empty .accdb outside the harness.
+
+    A test that opens a database the harness did not create needs one to
+    exist first, and a live scratch database cannot be copied: Access holds
+    it exclusively while it is open.
+    """
+    import pythoncom
+    import pywintypes
+    import win32com.client.dynamic
+
+    pythoncom.CoInitialize()
+    app = win32com.client.dynamic.Dispatch(pythoncom.CoCreateInstance(
+        pywintypes.IID("Access.Application"), None,
+        pythoncom.CLSCTX_LOCAL_SERVER, pythoncom.IID_IDispatch))
+    try:
+        app.Visible = False
+        app.NewCurrentDatabase(str(path))
+        app.CloseCurrentDatabase()
+    finally:
+        app.Quit(2)
+    # Quit returns before the process does, and the lock file outlives it.
+    deadline = time.monotonic() + 20.0
+    lock = path.with_suffix(".laccdb")
+    while time.monotonic() < deadline and lock.exists():
+        time.sleep(0.2)
+
+
 @pytest.fixture(scope="module", params=sorted(SESSION_CLASSES))
 def app_session(request):
     """One module-scoped session per application."""
@@ -286,6 +314,67 @@ class TestAccessSpecifics:
         session.close()
         assert _waited_for_exit(pid), "Access outlived its session"
         assert session.oracle_issues == []
+
+
+class TestTeardownModals:
+    """Closing is where Office prompts, so it is where the harness must be
+    watching. The watcher used to be stopped before teardown, which hid a
+    close-time dialog completely and turned it into a 15 second wait for the
+    cleanup deadline (measured 2026-08-19)."""
+
+    STRAY = """
+Public Sub MakeStray()
+    Dim c As Object
+    Set c = Application.VBE.ActiveVBProject.VBComponents.Add(1)
+    c.Name = "StrayModule"
+    c.CodeModule.AddFromString "Public Sub Nothing1()" & vbCrLf & "End Sub"
+End Sub
+"""
+
+    def test_untracked_access_module_does_not_prompt(self):
+        """A module the harness did not inject still has to be discarded in
+        a scratch database, or Access raises Save As and blocks Quit. The
+        harness created this database, so it owns every component in it."""
+        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0))
+        assert session.run_vba(self.STRAY,
+                               proc="MakeStray").outcome == PASSED
+        pid = session.app_pid
+        started = time.monotonic()
+        session.close()
+        elapsed = time.monotonic() - started
+        assert _waited_for_exit(pid), "Access outlived its session"
+        assert elapsed < 10.0, (
+            f"teardown took {elapsed:.1f}s; a save prompt most likely "
+            "blocked it")
+        kinds = [e.get("kind") for e in session.events]
+        assert "app-quit" in kinds, "expected a clean quit, not a kill"
+        assert session.oracle_issues == []
+
+    def test_close_time_prompt_is_reported_not_waited_out(self, tmp_path):
+        """In a database the caller opened, the harness must not delete
+        their components, so the prompt can happen. It must then be seen and
+        acted on rather than sat through."""
+        target = tmp_path / "caller.accdb"
+        _make_database(target)
+        assert target.exists()
+
+        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0))
+        pid = session.app_pid
+        session.open_document(target, read_only=False)
+        assert session.run_vba(self.STRAY,
+                               proc="MakeStray").outcome == PASSED
+        started = time.monotonic()
+        session.close()
+        elapsed = time.monotonic() - started
+        assert _waited_for_exit(pid), "Access outlived its session"
+        assert elapsed < 10.0, (
+            f"teardown took {elapsed:.1f}s; the prompt was waited out "
+            "instead of detected")
+        blocked = [e for e in session.events
+                   if e.get("kind") == "modal-blocked"]
+        assert blocked, "the close-time dialog was never reported"
+        assert any("save" in str(e.get("title", "")).lower()
+                   for e in blocked), [e.get("title") for e in blocked]
 
 
 class TestExcelOnlyCommandsAreRefused:
