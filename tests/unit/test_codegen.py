@@ -131,12 +131,12 @@ class TestCallModule:
         signature = ProcedureSignature("Add", KIND_FUNCTION, 2, 0, False)
         lines = codegen.call_expression("Mod", "Add", signature, 2)
         assert lines == [
-            "    resultValue = Mod.Add((callArgs(0)), (callArgs(1)))"]
+            "    resultValue = Mod.Add((pyVbaArg0), (pyVbaArg1))"]
 
     def test_sub_call_uses_call_and_empty(self):
         signature = ProcedureSignature("Go", KIND_SUB, 1, 0, False)
         lines = codegen.call_expression("Mod", "Go", signature, 1)
-        assert lines == ["    Call Mod.Go((callArgs(0)))",
+        assert lines == ["    Call Mod.Go((pyVbaArg0))",
                          "    resultValue = Empty"]
 
     def test_zero_args_omits_parentheses(self):

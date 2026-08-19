@@ -25,8 +25,14 @@ Other contracts:
   ``Attribute`` header lines; ``strip_module_header`` removes them.
 - ``Str$`` is used for numeric text because it is locale-invariant; ``CStr``
   would emit the user's decimal separator and break the JSON.
+- The dispatcher declares one explicit Variant parameter per argument
+  rather than a ParamArray. Word's Application.Run cannot marshal into a
+  ParamArray, failing with DISP_E_PARAMNOTFOUND (0x80020007), while explicit
+  parameters work in all four hosts (measured 2026-08-18). The dispatcher is
+  regenerated whenever the arity changes anyway, so naming the parameters
+  costs nothing.
 - Arguments are passed wrapped in parentheses to force ByVal evaluation, so
-  a Variant from the ParamArray can satisfy a typed ByRef parameter.
+  a Variant argument can satisfy a typed ByRef parameter.
 """
 from __future__ import annotations
 
@@ -84,22 +90,26 @@ def validate_module_name(name: str) -> None:
 
 
 # Document-module CLSIDs in the VB_Base attribute of an exported .cls:
-# Workbook, Worksheet, Chart. Excel owns these components, so they can be
-# edited but never recreated, which makes them unimportable.
+# Excel's Workbook, Worksheet and Chart, and Word's Document. The host owns
+# these components, so they can be edited but never recreated, which makes
+# them unimportable.
 _DOCUMENT_CLSIDS = (
     "{00020819-0000-0000-C000-000000000046}",
     "{00020820-0000-0000-C000-000000000046}",
     "{00020821-0000-0000-C000-000000000046}",
+    "{00020906-0000-0000-C000-000000000046}",
 )
 _DOCUMENT_NAME_RE = re.compile(
-    r"^(ThisWorkbook|Sheet\d+|Chart\d+|Feuil\d+|Hoja\d+|Tabelle\d+"
+    r"^(ThisWorkbook|ThisDocument|ThisPresentation"
+    r"|Sheet\d+|Chart\d+|Feuil\d+|Hoja\d+|Tabelle\d+"
     r"|Foglio\d+|Planilha\d+)$", re.IGNORECASE)
 _VB_BASE_RE = re.compile(r'^\s*Attribute\s+VB_Base\s*=\s*"([^"]*)"',
                          re.MULTILINE | re.IGNORECASE)
 
 
 def is_document_module(name: str, source: str) -> bool:
-    """True for Excel document modules (ThisWorkbook, Sheet1, charts)."""
+    """True for host-owned document modules (ThisWorkbook, Sheet1, charts,
+    ThisDocument)."""
     match = _VB_BASE_RE.search(source)
     if match:
         vb_base = match.group(1).upper()
@@ -265,10 +275,19 @@ End Function
 '''
 
 
+RUNNER_ARG_PREFIX = "pyVbaArg"
+
+
+def runner_parameters(arg_count: int) -> str:
+    """Explicit ``ByVal pyVbaArg0 As Variant, ...`` parameter list."""
+    return ", ".join(f"ByVal {RUNNER_ARG_PREFIX}{i} As Variant"
+                     for i in range(arg_count))
+
+
 def call_expression(module: str, proc: str, signature: ProcedureSignature,
                     arg_count: int) -> list[str]:
     """VBA statement lines that invoke the target and set ``resultValue``."""
-    args = ", ".join(f"(callArgs({i}))" for i in range(arg_count))
+    args = ", ".join(f"({RUNNER_ARG_PREFIX}{i})" for i in range(arg_count))
     call_args = f"({args})" if args else ""
     qualified = f"{module}.{proc}"
     if signature.returns_value:
@@ -280,9 +299,10 @@ def call_module_source(module: str, proc: str, signature: ProcedureSignature,
                        arg_count: int) -> str:
     """Generated per-target dispatcher module."""
     body = "\n".join(call_expression(module, proc, signature, arg_count))
+    parameters = runner_parameters(arg_count)
     return f'''Option Explicit
 
-Public Function {RUNNER_ENTRY}(ParamArray callArgs() As Variant) As String
+Public Function {RUNNER_ENTRY}({parameters}) As String
     Dim resultValue As Variant
     PyVbaResetOutput
     On Error GoTo Caught

@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from . import codegen, vbasig
 from .results import PASSED, HarnessError
-from .session import ExcelSession
+from .session import OfficeSession
 
 _FUZZ_MODULE = "PyVbaFuzz"
 
@@ -83,7 +83,7 @@ def strategy_for(parameter: vbasig.Parameter):
         "Double, Single, Currency, Boolean, String, Variant).")
 
 
-def check_vba_function(session: ExcelSession, source: str, proc: str,
+def check_vba_function(session: OfficeSession, source: str, proc: str,
                        check: Callable[[tuple, Any], bool] | None = None,
                        max_examples: int = 100,
                        run_timeout: float = 30.0,
@@ -108,8 +108,8 @@ def check_vba_function(session: ExcelSession, source: str, proc: str,
     def run_one(args: tuple) -> None:
         # Reinjection is a cache no-op normally, and exactly what is needed
         # right after a hang recycled the session.
-        if not session.has_workbook:
-            session.new_workbook()
+        if not session.has_document:
+            session.new_document()
         session.add_module(module_name, source, line_numbers=True)
         result = session.run_macro(f"{module_name}.{proc}", *args,
                                    timeout=run_timeout)

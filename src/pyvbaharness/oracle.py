@@ -3,19 +3,20 @@ contract.
 
 Ported from XLIDE's vbaTestHostOracle. The oracle is pure: it consumes the
 recorded event dicts (protocol.py vocabulary) and returns issues. Unit tests
-replay synthetic traces without Excel; ExcelSession validates its own trace
-at teardown and surfaces violations, so a regression in the harness's own
-safety behavior fails loudly instead of silently.
+replay synthetic traces without Office; every session validates its own
+trace at teardown and surfaces violations, so a regression in the harness's
+own safety behavior fails loudly instead of silently.
 
 Invariants:
 
-- exactly one owned Excel instance per session; attaching is forbidden
-- alerts suppressed and events disabled on the owned instance
+- exactly one owned application instance per session; attaching is forbidden
+- alerts suppressed on the owned instance, and events disabled where the app
+  has the setting at all (only Excel does)
 - every command carries a positive timeout
-- no command starts after the owned Excel was killed
-- a timeout / modal-blocked / hang outcome is followed by excel-killed
-- a normal session closes workbooks without saving (unless an explicit
-  save_as command ran) and quits Excel
+- no command starts after the owned application was killed
+- a timeout / modal-blocked / hang outcome is followed by app-killed
+- a normal session closes documents without saving (unless an explicit
+  save_as command ran) and quits the application
 """
 from __future__ import annotations
 
@@ -35,15 +36,15 @@ class OracleIssue:
 def validate_session_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
     """Validate a session trace that may span worker recycles.
 
-    Each excel-created starts a new lifecycle generation; every generation
+    Each app-created starts a new lifecycle generation; every generation
     must independently satisfy the contract. Without the split, a recycle
-    would falsely trip single-owned-excel-instance and
+    would falsely trip single-owned-app-instance and
     no-commands-after-kill.
     """
     segments: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
     for event in events:
-        if event.get("kind") == p.EV_EXCEL_CREATED and current:
+        if event.get("kind") == p.EV_APP_CREATED and current:
             segments.append(current)
             current = []
         current.append(event)
@@ -58,33 +59,38 @@ def validate_session_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
 def validate_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
     issues: list[OracleIssue] = []
     if not events:
-        return [OracleIssue("empty-trace",
-                            "A session trace must record the Excel lifecycle.")]
+        return [OracleIssue(
+            "empty-trace",
+            "A session trace must record the application lifecycle.")]
 
-    created = _indexed(events, p.EV_EXCEL_CREATED)
-    killed = _indexed(events, p.EV_EXCEL_KILLED)
-    quit_events = _indexed(events, p.EV_EXCEL_QUIT)
+    created = _indexed(events, p.EV_APP_CREATED)
+    killed = _indexed(events, p.EV_APP_KILLED)
+    quit_events = _indexed(events, p.EV_APP_QUIT)
     started = _indexed(events, p.EV_COMMAND_STARTED)
     finished = _indexed(events, p.EV_COMMAND_FINISHED)
-    closed = _indexed(events, p.EV_WORKBOOK_CLOSED)
+    closed = _indexed(events, p.EV_DOCUMENT_CLOSED)
 
     if len(created) != 1:
         issues.append(OracleIssue(
-            "single-owned-excel-instance",
-            "A session must create exactly one owned Excel instance.",
+            "single-owned-app-instance",
+            "A session must create exactly one owned application instance.",
             created[0][0] if created else None))
     for index, event in created:
         if event.get("attached"):
             issues.append(OracleIssue(
-                "attached-excel-instance",
-                "The harness must never attach to a user Excel instance.",
+                "attached-app-instance",
+                "The harness must never attach to a user's own running "
+                "application.",
                 index))
         if event.get("display_alerts") is not False:
             issues.append(OracleIssue(
                 "suppress-alerts",
-                "The owned Excel instance must run with DisplayAlerts=False.",
+                "The owned instance must run with alerts suppressed.",
                 index))
-        if event.get("enable_events") is not False:
+        # None means the app has no EnableEvents setting (everything except
+        # Excel). Only a genuine True is a violation; demanding False from an
+        # app that cannot offer it would be an invariant about nothing.
+        if event.get("enable_events") not in (False, None):
             issues.append(OracleIssue(
                 "suppress-events",
                 "The owned Excel instance must run with EnableEvents=False.",
@@ -102,7 +108,7 @@ def validate_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
         if first_kill is not None and index > first_kill:
             issues.append(OracleIssue(
                 "no-commands-after-kill",
-                "No command may start after the owned Excel was killed.",
+                "No command may start after the owned application was killed.",
                 index))
 
     hang_outcomes = {"timeout", "modal-blocked", "hung"}
@@ -115,7 +121,7 @@ def validate_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
             issues.append(OracleIssue(
                 "hang-cleanup",
                 "A timeout or blocked modal must be followed by killing the "
-                "owned Excel instance.",
+                "owned application instance.",
                 hang_index))
         return issues
 
@@ -126,14 +132,14 @@ def validate_trace(events: list[dict[str, Any]]) -> list[OracleIssue]:
         if event.get("save_changes") and not saved_explicitly:
             issues.append(OracleIssue(
                 "close-without-saving",
-                "Workbooks must close without saving unless an explicit "
+                "Documents must close without saving unless an explicit "
                 "save command ran.",
                 index))
 
     if not killed and not quit_events:
         issues.append(OracleIssue(
             "normal-cleanup",
-            "A session must quit (or kill) its owned Excel instance.",
+            "A session must quit (or kill) its owned application instance.",
             None))
 
     return issues

@@ -379,6 +379,25 @@ End Sub
                                                include_harness_support=True)
         assert with_support.outcome == COMPILE_ACCEPTED
 
+    def test_runs_after_a_compile_are_not_reported_as_blocked(self, session):
+        """A compile check leaves the VBE open, and a VBE add-in can raise
+        its window again once runs resume. That is design mode, not a
+        debugger break, and must not kill the session.
+
+        Regression guard: with XLIDE loaded, the watcher reported the
+        reappearing VBE window as a takeover and killed a healthy session
+        around 30 to 50 runs after the compile (2026-08-18).
+        """
+        session.run_vba(BASIC_SOURCE, proc="Main")
+        assert session.compile_project(watch_seconds=5.0).outcome in (
+            COMPILE_ACCEPTED, COMPILE_REJECTED)
+        for index in range(60):
+            result = session.run_macro("PyVbaUserCode.AddNums", index, 1)
+            assert result.outcome == PASSED, (
+                f"run {index} after compile: {result.outcome} "
+                f"{result.message}")
+        assert not session.is_dead
+
     def test_syntax_error_rejected_with_dialog_text(self, session):
         session.new_workbook()
         session.add_module("BadMod", """
@@ -475,7 +494,7 @@ End Function
         excel_pid = session.excel_pid
         worker_pid = session._proc.pid
         created = [e for e in session.events
-                   if e.get("kind") == "excel-created"][0]
+                   if e.get("kind") == "app-created"][0]
         try:
             assert created.get("job_kill_on_close") is True
             assert is_process_alive(excel_pid)
@@ -498,7 +517,7 @@ End Function
         lines = trace_path.read_text(encoding="utf-8").splitlines()
         assert lines
         parsed = [json.loads(line) for line in lines]
-        assert any(e.get("kind") == "excel-created" for e in parsed)
+        assert any(e.get("kind") == "app-created" for e in parsed)
 
     def test_no_manifest_files_survive(self, tmp_path):
         config = HarnessConfig(exclusive=False, manifest_dir=tmp_path,

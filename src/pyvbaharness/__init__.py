@@ -1,8 +1,9 @@
-"""pyVBAharness: a hang-resistant harness for running VBA in desktop Excel.
+"""pyVBAharness: a hang-resistant harness for running VBA in desktop Office.
 
-Requires Windows, desktop Excel, and the Excel option "Trust access to the
-VBA project object model" (File > Options > Trust Center > Trust Center
-Settings > Macro Settings). See README.md.
+Supports Excel, Word, PowerPoint and Access. Requires Windows, the desktop
+application, and its "Trust access to the VBA project object model" option
+(File > Options > Trust Center > Trust Center Settings > Macro Settings).
+Access has no such option and needs no setting. See README.md.
 """
 from .numbering import (
     add_line_numbers,
@@ -31,12 +32,26 @@ from .results import (
     WorkerProtocolError,
 )
 from .pool import SessionPool
-from .session import ExcelSession, HarnessConfig, run_vba
+from .session import (
+    AccessSession,
+    ExcelSession,
+    HarnessConfig,
+    OfficeSession,
+    PowerPointSession,
+    WordSession,
+    run_vba,
+    session_for,
+)
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 __all__ = [
     "ExcelSession",
+    "WordSession",
+    "PowerPointSession",
+    "AccessSession",
+    "OfficeSession",
+    "session_for",
     "SessionPool",
     "HarnessConfig",
     "run_vba",

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyvbaharness"
-version = "1.0.1"
-description = "Hang-resistant Python harness for running and validating VBA in desktop Excel"
+version = "1.1.0"
+description = "Hang-resistant Python harness for running and validating VBA in desktop Excel, Word, PowerPoint and Access"
 readme = "README.md"
 requires-python = ">=3.10"
 # SPDX expression per PEP 639. Do not add a "License ::" classifier
@@ -14,8 +14,8 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "William Smith Edward" }]
 keywords = [
-    "excel", "vba", "automation", "com", "testing", "pytest",
-    "macro", "xlsm", "windows",
+    "excel", "word", "powerpoint", "access", "office", "vba",
+    "automation", "com", "testing", "pytest", "macro", "xlsm", "windows",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -29,6 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business",
     "Topic :: Office/Business :: Financial :: Spreadsheet",
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",

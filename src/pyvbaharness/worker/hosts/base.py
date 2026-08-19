@@ -1,23 +1,28 @@
-"""All Excel COM access for the worker process.
+"""Shared Office COM host: everything that is not app-specific.
 
 Rules enforced here (see docs/architecture.md):
 
-- always a NEW Excel instance via CoCreateInstance with CLSCTX_LOCAL_SERVER;
-  never GetActiveObject (a user's open Excel is out of bounds)
+- always a NEW application instance via CoCreateInstance with
+  CLSCTX_LOCAL_SERVER; never GetActiveObject (a user's open Office document
+  is out of bounds, because a timeout kills the instance)
 - purely late-bound dynamic dispatch: the pywin32 gencache is never touched
   (a corrupt gencache was observed on the reference machine; dynamic
   dispatch sidesteps that entire failure class)
-- alerts, events, screen updating, and link prompts are disabled before any
-  workbook exists
-- the Excel PID is discovered from the Application window handle immediately
-  after creation, so the supervisor can always kill exactly this instance
+- prompts are made impossible before they can fire, rather than dismissed
+  after; every alert switch is set before a document exists
+- the host process id is discovered and proven new before the harness
+  touches the application at all, so the supervisor can always kill exactly
+  this instance and never someone else's
+
+Subclasses supply the app-specific seams: the ProgID and image name, how the
+application is configured, where the VBA project lives, how a document is
+created/opened/saved/closed, and how ``Application.Run`` is addressed.
 """
 from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wt
 import gc
-import time
 from pathlib import Path
 from typing import Any
 
@@ -26,37 +31,23 @@ import pywintypes
 import win32com.client.dynamic
 from pywintypes import com_error
 
-from .. import codegen, vbasig
-from ..process_control import KillOnCloseJob, process_ids_by_image
-from ..ranges import plan_write_chunks, validate_block
+from ... import apps, codegen, vbasig
+from ...lock import CREATE_MUTEX_NAME, SessionLock
+from ...process_control import KillOnCloseJob, process_ids_by_image
 
-# Office/Excel constants (hardcoded: no gencache, no typelib import).
+# Office constants (hardcoded: no gencache, no typelib import).
 MSO_AUTOMATION_SECURITY_LOW = 1
-XL_FORMAT_BY_EXTENSION = {
-    ".xlsm": 52,  # xlOpenXMLWorkbookMacroEnabled
-    ".xlsb": 50,  # xlExcel12
-}
 VBEXT_CT_STD_MODULE = 1
 VBEXT_CT_CLASS_MODULE = 2
-
-# Largest block written in one Value2 assignment. Measured on Excel 365 x64
-# (2026-07-25): after any macro has run in the workbook, a single Value2
-# assignment covering roughly 6000+ cells wedges Excel indefinitely, with the
-# COM call never returning and every Excel window reporting IsHungAppWindow.
-# The boundary is not a clean cell count (50x100 completed in 0.26 s while
-# 100x50 took 5.5 s and 100x64 hung), so the cap is set well below the
-# smallest observed failure. Chunking is also faster: 10000 cells written as
-# 2500-cell blocks took 0.149 s against 0.05 s for a single pre-macro write,
-# and reads are unaffected (10000 cells in 0.008 s).
-MAX_WRITE_CELLS_PER_CHUNK = 2000
 MSO_CONTROL_POPUP = 10
 VBE_COMPILE_CONTROL_ID = 578  # "Compile <project>" on the VBE Debug menu
 
-_ACCESS_VBOM_HINT = (
-    "Excel refused programmatic access to the VBA project. Enable: File > "
-    "Options > Trust Center > Trust Center Settings > Macro Settings > "
-    "'Trust access to the VBA project object model'."
-)
+# Creating an instance is snapshot -> CoCreateInstance -> diff. Two sessions
+# starting at once would each see the other's new process in the diff, so the
+# whole window is serialized machine-wide. Startup is 1-3 s, and COM server
+# activation largely serializes anyway, so the cost is small next to owning a
+# wrong process.
+CREATE_LOCK_TIMEOUT_S = 120.0
 
 
 class HostError(Exception):
@@ -65,6 +56,21 @@ class HostError(Exception):
     def __init__(self, message: str, hresult: int | None = None) -> None:
         super().__init__(message)
         self.hresult = hresult
+
+
+# COM's own "the callee would not take the call" results. Office returns
+# these while it is busy or has a modal dialog up, and the bare HRESULT is
+# unreadable, so they are named. pywin32 exposes no CoRegisterMessageFilter,
+# so these cannot be retried from inside; the watcher reports the dialog and
+# the supervisor's deadline bounds the rest.
+_REJECTION_HRESULTS = {
+    0x80010001: "the host rejected the call (RPC_E_CALL_REJECTED): it is "
+                "busy, or a modal dialog is waiting for input",
+    0x8001010A: "the host was busy and did not answer in time "
+                "(RPC_E_SERVERCALL_RETRYLATER)",
+    0x80010005: "the host was in the middle of another call "
+                "(RPC_E_SERVERCALL_RETRYLATER, nested call)",
+}
 
 
 def describe_com_error(err: com_error) -> tuple[str, int | None]:
@@ -85,30 +91,75 @@ def describe_com_error(err: com_error) -> tuple[str, int | None]:
             parts.append(f"scode=0x{scode & 0xFFFFFFFF:08X}")
     elif getattr(err, "strerror", None):
         parts.append(str(err.strerror))
+    if hresult is not None:
+        rejection = _REJECTION_HRESULTS.get(hresult & 0xFFFFFFFF)
+        if rejection:
+            parts.append(rejection)
     return ("; ".join(parts) or str(err)), hresult
 
 
-def _wrap_com(stage: str):
-    """Decorator: convert com_error into HostError with the stage named."""
+def _wrap_com(stage: str, tolerate_disconnect: bool = False):
+    """Decorator: convert com_error into HostError with the stage named.
+
+    ``tolerate_disconnect`` additionally converts the AttributeError that
+    win32com's dynamic dispatch raises when it cannot resolve a member on a
+    disconnected object. That happens when the host process has already
+    exited: GetIDsOfNames fails, and pywin32 reports it as a missing
+    attribute rather than a COM error. Only teardown sets this, because
+    swallowing AttributeError anywhere else would hide ordinary typos in
+    this file.
+    """
 
     def decorate(func):
-        def wrapper(*args, **kwargs):
+        def wrapper(self, *args, **kwargs):
             try:
-                return func(*args, **kwargs)
+                return func(self, *args, **kwargs)
             except com_error as err:
                 message, hresult = describe_com_error(err)
                 if "not trusted" in message.lower():
-                    message = f"{message} {_ACCESS_VBOM_HINT}"
+                    message = f"{message} {self.vbom_hint()}"
                 raise HostError(f"{stage}: {message}", hresult) from err
+            except AttributeError as err:
+                if not tolerate_disconnect:
+                    raise
+                raise HostError(
+                    f"{stage}: the {self.info.label} object is no longer "
+                    f"reachable ({err}); the process it belonged to has "
+                    "already exited.") from err
         return wrapper
 
     return decorate
 
 
-class ExcelHost:
+class OfficeHost:
+    """Base for the per-application COM hosts.
+
+    Subclasses must set the class attributes and implement the document
+    lifecycle plus ``_components`` and ``_run_ref``.
+    """
+
+    #: The only identity a subclass must declare; everything else
+    #: (ProgID, image name, whether it can hide or run more than one
+    #: instance) comes from apps.py so there is one place to correct.
+    app_key = ""
+    # Trust Center path for the "trust access to the VBA project" setting.
+    # Access and Publisher expose no such option, so their hint differs.
+    vbom_settings_path = ("File > Options > Trust Center > Trust Center "
+                          "Settings > Macro Settings")
+    module_extensions = {1: ".bas", 2: ".cls", 3: ".frm", 100: ".cls"}
+    # Only Excel exposes Application.EnableEvents. Reporting False for
+    # the others would put a setting in the trace that was never made,
+    # so the oracle checks this invariant per app.
+    has_enable_events = False
+
     def __init__(self) -> None:
+        self.info = apps.info(self.app_key)
+        self.progid = self.info.progid
+        self.image_name = self.info.image_name
+        self.document_noun = self.info.document_noun
+        self.can_hide = self.info.can_hide
         self.app: Any = None
-        self.workbook: Any = None
+        self.document: Any = None
         self.pid: int = 0
         self.job_active = False
         self.progress_path: str = ""
@@ -121,77 +172,105 @@ class ExcelHost:
         self._batch_signature: frozenset | None = None
         self._resolved: dict[str, tuple[str, str, vbasig.ProcedureSignature]] = {}
         self._compile_control: Any = None
+        # Names this session added to the VBA project. Hosts whose
+        # teardown must delete them (Access prompts for unsaved
+        # modules) need to touch only these, never the caller's own.
+        self._injected: set[str] = set()
+
+    def vbom_hint(self) -> str:
+        return (f"{self.info.label} refused programmatic access to the VBA "
+                f"project. Enable: {self.vbom_settings_path} > tick 'Trust "
+                "access to the VBA project object model'.")
 
     # ----- lifecycle -------------------------------------------------------
 
-    @_wrap_com("create Excel application")
+    @_wrap_com("create application")
     def create(self) -> dict[str, Any]:
-        """Create a brand-new Excel instance and prove it is new.
+        """Create a brand-new instance and prove it is new before touching it.
 
         ``win32com.client.Dispatch("Excel.Application")`` must not be used
         here: given a ProgID string it first calls ``pythoncom.connect``,
-        which is GetActiveObject, so it silently ATTACHES to whatever Excel
-        is already running (observed live, 2026-07-25: two Dispatch calls
-        returned the same PID). Attaching would put a user's own workbooks
-        inside the harness's blast radius, since a timeout kills the
-        instance. CoCreateInstance always launches a fresh server, and the
-        PID snapshot below turns any regression into a refusal instead of a
-        silent hijack.
+        which is GetActiveObject, so it silently ATTACHES to whatever is
+        already running (observed live, 2026-07-25: two Dispatch calls
+        returned the same PID). Attaching would put a user's own documents
+        inside the harness's blast radius. CoCreateInstance always launches a
+        fresh server, and the ownership proof below turns any regression into
+        a refusal instead of a silent hijack.
+
+        Nothing is configured until ownership is proven: setting Visible or
+        DisplayAlerts on a stranger's application would already be damage.
         """
         pythoncom.CoInitialize()
-        before = process_ids_by_image("EXCEL.EXE")
-        clsid = pywintypes.IID("Excel.Application")
-        dispatch = pythoncom.CoCreateInstance(
-            clsid, None, pythoncom.CLSCTX_LOCAL_SERVER,
-            pythoncom.IID_IDispatch)
-        self.app = win32com.client.dynamic.Dispatch(dispatch)
-        app = self.app
-        app.Visible = False
-        app.DisplayAlerts = False
-        try:
-            app.EnableEvents = False
-        except com_error:
-            pass
-        try:
-            app.ScreenUpdating = False
-        except com_error:
-            pass
-        try:
-            app.AskToUpdateLinks = False
-        except com_error:
-            pass
-        app.AutomationSecurity = MSO_AUTOMATION_SECURITY_LOW
-        self.pid = self._pid_from_hwnd(int(app.Hwnd))
-        if self.pid in before:
-            # Do not touch it further: this Excel belongs to someone else.
-            self.app = None
-            raise HostError(
-                f"Refusing to run: the new Excel Application resolved to "
-                f"already-running process {self.pid}. The harness must own "
-                "its Excel instance because it kills that process on a hang.")
-        # Tie Excel's lifetime to this worker process: if the worker dies for
-        # any reason, the kernel kills Excel (kill-on-close job). Assignment
-        # can fail under restrictive job policies; the manifest sweep remains
-        # as the fallback for that case.
+        with SessionLock(timeout_s=CREATE_LOCK_TIMEOUT_S,
+                         name=CREATE_MUTEX_NAME, purpose="create"):
+            before = process_ids_by_image(self.image_name)
+            dispatch = pythoncom.CoCreateInstance(
+                pywintypes.IID(self.progid), None,
+                pythoncom.CLSCTX_LOCAL_SERVER, pythoncom.IID_IDispatch)
+            self.app = win32com.client.dynamic.Dispatch(dispatch)
+            after = process_ids_by_image(self.image_name)
+            self.pid = self._prove_owned(before, after)
+
+        # Tie the application's lifetime to this worker process: if the worker
+        # dies for any reason, the kernel kills it (kill-on-close job).
+        # Assignment can fail under restrictive job policies; the manifest
+        # sweep remains as the fallback for that case.
         self._job = KillOnCloseJob()
         self.job_active = self._job.assign(self.pid)
-        excel_version = ""
-        excel_build = ""
-        try:
-            excel_version = str(app.Version)
-            excel_build = str(app.Build)
-        except com_error:
-            pass
+
+        self._configure_app()
+        version, build = self._version_info()
         return {
+            "app": self.app_key,
             "pid": self.pid,
             "attached": False,
-            "visible": False,
+            "visible": not self.can_hide,
             "display_alerts": False,
-            "enable_events": False,
+            "enable_events": False if self.has_enable_events else None,
             "job_kill_on_close": self.job_active,
-            "excel_version": excel_version,
-            "excel_build": excel_build,
+            "can_hide": self.can_hide,
+            "app_version": version,
+            "app_build": build,
         }
+
+    def _prove_owned(self, before: set[int], after: set[int]) -> int:
+        """Return the PID of the instance just created, or refuse.
+
+        Two independent signals, because neither alone is sufficient. The
+        window handle authoritatively ties an Application object to a
+        process but is not exposed by every app (Word has no
+        Application.Hwnd). The process-list difference always works but
+        could in principle catch a process the user started at the same
+        moment, so it is only trusted when it names exactly one new process.
+        """
+        new = after - before
+        hwnd = self._app_hwnd()
+        if hwnd:
+            pid = self._pid_from_hwnd(hwnd)
+            if pid and pid not in before:
+                return pid
+            self.app = None
+            raise HostError(
+                f"Refusing to run: the new {self.info.label} Application "
+                f"resolved to already-running process {pid}. The harness "
+                "must own its instance because it kills that process on a "
+                "hang.")
+        if len(new) == 1:
+            return new.pop()
+        self.app = None
+        if not new:
+            if not self.info.multi_instance:
+                raise HostError(apps.single_instance_reason(self.app_key))
+            raise HostError(
+                f"Refusing to run: creating a {self.info.label} Application "
+                f"started no new {self.image_name} process, so it attached "
+                "to one that was already running. The harness must own its "
+                "instance because it kills that process on a hang.")
+        raise HostError(
+            f"Refusing to run: {len(new)} new {self.image_name} processes "
+            f"appeared while creating the {self.info.label} Application, so "
+            "the one it owns cannot be identified. Close other instances and "
+            "retry.")
 
     @staticmethod
     def _pid_from_hwnd(hwnd: int) -> int:
@@ -199,38 +278,65 @@ class ExcelHost:
         ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return pid.value
 
+    def _app_hwnd(self) -> int:
+        """Main-window handle, or 0 when the app does not expose one."""
+        try:
+            return int(self.app.Hwnd)
+        except (com_error, AttributeError, TypeError, ValueError):
+            return 0
+
+    def _version_info(self) -> tuple[str, str]:
+        version = build = ""
+        try:
+            version = str(self.app.Version)
+        except com_error:
+            pass
+        try:
+            build = str(self.app.Build)
+        except com_error:
+            pass
+        return version, build
+
+    def _configure_app(self) -> None:
+        """Set every prompt-suppressing switch, before a document exists."""
+        raise NotImplementedError
+
+    def _set_quietly(self, name: str, value: Any) -> bool:
+        """Best-effort property set; False when the app rejects it."""
+        try:
+            setattr(self.app, name, value)
+            return True
+        except com_error:
+            return False
+
     def _resuppress_alerts(self) -> None:
         """Re-assert alert suppression before a harness-initiated operation.
 
-        User VBA can set Application.DisplayAlerts = True and leave it that
-        way, which would let a later harness Close or SaveAs raise a prompt
-        that nothing can dismiss (Excel's own prompts carry no Win32
-        buttons). Cheap insurance on the infrequent operations that can
-        prompt; the hot run path does not pay for it.
+        User VBA can turn alerts back on and leave them that way, which would
+        let a later harness Close or SaveAs raise a prompt that nothing can
+        dismiss (Office's own prompts carry no Win32 buttons). Cheap
+        insurance on the infrequent operations that can prompt; the hot run
+        path does not pay for it.
         """
-        try:
-            self.app.DisplayAlerts = False
-        except com_error:
-            pass
+        raise NotImplementedError
 
-    @_wrap_com("close workbook")
-    def close_workbook(self) -> None:
-        if self.workbook is not None:
-            self._resuppress_alerts()
-            self.workbook.Close(False)
-            self.workbook = None
-            self._reset_injection_state()
+    @_wrap_com("close document")
+    def close_document(self) -> None:
+        raise NotImplementedError
 
-    @_wrap_com("quit Excel")
+    @_wrap_com("quit application", tolerate_disconnect=True)
     def quit(self) -> None:
         if self.app is not None:
             self._resuppress_alerts()
-            self.app.Quit()
+            self._quit_app()
+
+    def _quit_app(self) -> None:
+        self.app.Quit()
 
     def release(self) -> None:
         """Drop COM references; hangs here are covered by the supervisor's
         cleanup watchdog, not by local timeouts."""
-        self.workbook = None
+        self.document = None
         self._compile_control = None
         self.app = None
         gc.collect()
@@ -240,59 +346,30 @@ class ExcelHost:
         except Exception:
             pass
 
-    # ----- workbooks -------------------------------------------------------
+    # ----- documents -------------------------------------------------------
 
-    @_wrap_com("create workbook")
-    def new_workbook(self) -> dict[str, Any]:
-        self.close_workbook()
-        self.workbook = self.app.Workbooks.Add()
-        self._reset_injection_state()
-        return {"name": str(self.workbook.Name), "path": "", "unsaved": True}
+    def new_document(self) -> dict[str, Any]:
+        raise NotImplementedError
 
-    @_wrap_com("open workbook")
-    def open_workbook(self, path: str, read_only: bool) -> dict[str, Any]:
-        self.close_workbook()
-        workbooks = self.app.Workbooks
-        missing = getattr(pythoncom, "Missing", None)
-        opened = None
-        if missing is not None:
-            try:
-                # Positional: Filename, UpdateLinks, ReadOnly, Format,
-                # Password, WriteResPassword, IgnoreReadOnlyRecommended.
-                opened = workbooks.Open(path, 0, read_only, missing, missing,
-                                        missing, True)
-            except (TypeError, ValueError):
-                opened = None
-        if opened is None:
-            opened = workbooks.Open(path, 0, read_only)
-        self.workbook = opened
-        self._reset_injection_state()
-        return {
-            "name": str(opened.Name),
-            "path": str(opened.FullName),
-            "read_only": bool(opened.ReadOnly),
-            "update_links": 0,
-            "display_alerts": False,
-        }
+    def open_document(self, path: str, read_only: bool) -> dict[str, Any]:
+        raise NotImplementedError
 
-    @_wrap_com("save workbook")
     def save_as(self, path: str) -> dict[str, Any]:
-        self._require_workbook()
-        suffix = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path else ""
-        file_format = XL_FORMAT_BY_EXTENSION.get(suffix)
-        if file_format is None:
-            raise HostError(
-                f"save_as supports .xlsm and .xlsb, not {suffix or path!r}: "
-                "other formats silently drop VBA under suppressed alerts.")
-        self._resuppress_alerts()
-        self.workbook.SaveAs(path, file_format)
-        return {"path": str(self.workbook.FullName)}
+        raise NotImplementedError
 
-    def _require_workbook(self) -> None:
-        if self.workbook is None:
-            raise HostError("No workbook is open in this session.")
+    def _document_name(self) -> str:
+        return str(self.document.Name)
+
+    def _require_document(self) -> None:
+        if self.document is None:
+            raise HostError(
+                f"No {self.document_noun} is open in this session.")
 
     # ----- VBA project -----------------------------------------------------
+
+    def _components(self) -> Any:
+        """The VBComponents collection holding the harness's modules."""
+        raise NotImplementedError
 
     def _reset_injection_state(self) -> None:
         self._support_installed = False
@@ -300,6 +377,7 @@ class ExcelHost:
         self._batch_signature = None
         self._progress_set = False
         self._resolved = {}
+        self._injected = set()
 
     @_wrap_com("add module")
     def add_module(self, name: str, source: str, kind: str) -> dict[str, Any]:
@@ -310,7 +388,7 @@ class ExcelHost:
                       kind: str) -> dict[str, Any]:
         """Create or replace a module. Skips the reserved-name check so the
         harness can inject its own modules."""
-        self._require_workbook()
+        self._require_document()
         self._resolved = {}  # module change invalidates cached signatures
         # Changing the VBProject resets VBA module-level state, so anything
         # pushed into the support module (progress path, coverage arrays)
@@ -322,7 +400,7 @@ class ExcelHost:
         component_kind = (VBEXT_CT_CLASS_MODULE if kind == "class"
                           else VBEXT_CT_STD_MODULE)
         body = codegen.strip_module_header(source)
-        components = self.workbook.VBProject.VBComponents
+        components = self._components()
         existing = self._find_component(components, name)
         if existing is not None:
             components.Remove(existing)
@@ -330,16 +408,22 @@ class ExcelHost:
         component.Name = name
         if body.strip():
             component.CodeModule.AddFromString(body)
+        self._injected.add(name)
+        self._after_module_write(name)
         return {"name": name, "kind": kind, "lines": body.count("\n") + 1}
+
+    def _after_module_write(self, name: str) -> None:
+        """Hook for apps that must register a module beyond the VBE."""
 
     @_wrap_com("remove module")
     def remove_module(self, name: str) -> dict[str, Any]:
-        self._require_workbook()
-        components = self.workbook.VBProject.VBComponents
+        self._require_document()
+        components = self._components()
         component = self._find_component(components, name)
         if component is None:
             return {"name": name, "removed": False}
         components.Remove(component)
+        self._injected.discard(name)
         if name.lower() == codegen.SUPPORT_MODULE_NAME.lower():
             self._support_installed = False
         if name.lower() == codegen.CALL_MODULE_NAME.lower():
@@ -381,7 +465,7 @@ class ExcelHost:
                                  ) -> tuple[str, str,
                                             vbasig.ProcedureSignature]:
         parts = target.split(".")
-        components = self.workbook.VBProject.VBComponents
+        components = self._components()
         reserved = {n.lower() for n in codegen.HARNESS_MODULE_NAMES}
         if len(parts) == 2:
             module_name, proc_name = parts
@@ -389,7 +473,7 @@ class ExcelHost:
             if component is None:
                 raise HostError(
                     f"Module {module_name!r} does not exist in this "
-                    "workbook's VBA project.")
+                    f"{self.document_noun}'s VBA project.")
             signature = vbasig.find_procedure(self._module_source(component),
                                               proc_name)
             if signature is None:
@@ -409,7 +493,8 @@ class ExcelHost:
             if signature is not None:
                 return name, proc_name, signature
         raise HostError(
-            f"No module in this workbook declares a callable {proc_name!r}.")
+            f"No module in this {self.document_noun} declares a callable "
+            f"{proc_name!r}.")
 
     def _ensure_support(self) -> None:
         if self._support_installed:
@@ -421,9 +506,9 @@ class ExcelHost:
     def _ensure_progress_path(self) -> None:
         """Push the progress-file path into VBA, after all module writes.
 
-        Excel is not a child of the worker, so environment variables cannot
-        carry the path. It must be (re)pushed whenever the VBProject
-        changed, because that resets VBA module-level state.
+        The Office process is not a child of the worker, so environment
+        variables cannot carry the path. It must be (re)pushed whenever the
+        VBProject changed, because that resets VBA module-level state.
         """
         if not self.progress_path or self._progress_set:
             return
@@ -445,13 +530,21 @@ class ExcelHost:
         self.run_support("PyVbaCovInit", [modules, max_line])
         self._cov_set = True
 
+    # ----- running ---------------------------------------------------------
+
+    def _run_ref(self, module: str, proc: str) -> str:
+        """The string ``Application.Run`` wants for a harness-owned proc."""
+        raise NotImplementedError
+
+    def _invoke_run(self, ref: str, args: list[Any]) -> Any:
+        return self.app.Run(ref, *args)
+
     @_wrap_com("call support procedure")
     def run_support(self, proc: str, args: list[Any]) -> Any:
         """Internal Run into the support module (coverage, progress path)."""
-        self._require_workbook()
-        ref = codegen.qualified_run_ref(
-            str(self.workbook.Name), codegen.SUPPORT_MODULE_NAME, proc)
-        return self.app.Run(ref, *args)
+        self._require_document()
+        return self._invoke_run(
+            self._run_ref(codegen.SUPPORT_MODULE_NAME, proc), args)
 
     @_wrap_com("install support module")
     def ensure_support_module(self) -> dict[str, Any]:
@@ -461,7 +554,7 @@ class ExcelHost:
         assert helpers to resolve; running code gets them injected
         automatically, a bare compile does not.
         """
-        self._require_workbook()
+        self._require_document()
         self._ensure_support()
         return {"name": codegen.SUPPORT_MODULE_NAME}
 
@@ -477,17 +570,15 @@ class ExcelHost:
             "standard")
         self._call_signature = key
 
-    # ----- running ---------------------------------------------------------
-
     @_wrap_com("run VBA")
     def run(self, target: str, args: list[Any]) -> str:
         """Managed run through the generated dispatcher.
 
         Returns the dispatcher's JSON string. The dispatcher calls the target
         directly (not through Application.Run) so a VBA error unwinds into
-        its On Error handler instead of raising Excel's runtime dialog.
+        its On Error handler instead of raising the host's runtime dialog.
         """
-        self._require_workbook()
+        self._require_document()
         codegen.validate_run_target(target)
         if len(args) > codegen.MAX_RUN_ARGS:
             raise HostError(
@@ -502,180 +593,46 @@ class ExcelHost:
         self._ensure_dispatcher(module, proc, signature, len(args))
         self._ensure_progress_path()
         self._ensure_coverage()
-        ref = codegen.qualified_run_ref(
-            str(self.workbook.Name), codegen.CALL_MODULE_NAME,
-            codegen.RUNNER_ENTRY)
-        return str(self.app.Run(ref, *args))
+        return str(self._invoke_run(
+            self._run_ref(codegen.CALL_MODULE_NAME, codegen.RUNNER_ENTRY),
+            args))
 
     @_wrap_com("run VBA (raw)")
     def run_raw(self, target: str, args: list[Any]) -> Any:
         """Direct Application.Run without the runner (no in-VBA trapping)."""
-        self._require_workbook()
+        self._require_document()
         codegen.validate_run_target(target)
         parts = target.split(".")
         if len(parts) == 2:
-            ref = codegen.qualified_run_ref(str(self.workbook.Name),
-                                            parts[0], parts[1])
+            ref = self._run_ref(parts[0], parts[1])
         else:
-            escaped = str(self.workbook.Name).replace("'", "''")
-            ref = f"'{escaped}'!{parts[0]}"
-        return self.app.Run(ref, *args)
+            ref = self._bare_run_ref(parts[0])
+        return self._invoke_run(ref, args)
 
-    # ----- ranges ----------------------------------------------------------
+    def _bare_run_ref(self, proc: str) -> str:
+        return proc
 
-    @_wrap_com("read range")
-    def read_range(self, sheet: str, ref: str) -> list[list[Any]]:
-        self._require_workbook()
-        value = self.workbook.Worksheets(sheet).Range(ref).Value2
-        if isinstance(value, tuple):
-            return [list(row) if isinstance(row, tuple) else [row]
-                    for row in value]
-        return [[value]]
-
-    @_wrap_com("write range")
-    def write_range(self, sheet: str, start_cell: str,
-                    data: list[list[Any]]) -> dict[str, Any]:
-        """Write a 2-D block, in bounded chunks.
-
-        Two live-verified constraints shape this (2026-07-25):
-
-        The target range is built from explicit corner cells rather than
-        ``Range(...).Resize(rows, cols)``. Under late-bound dispatch a
-        property whose parameters are all optional (Resize, Offset) is
-        invoked with no arguments, and the trailing call becomes the returned
-        range's default Item indexer, so Resize(2, 2) yields the single cell
-        B2 instead of A1:B2.
-
-        The block is split into MAX_WRITE_CELLS_PER_CHUNK pieces because a
-        single oversized Value2 assignment wedges Excel after any macro has
-        run in the workbook. See that constant for the measurements.
-        """
-        self._require_workbook()
-        try:
-            width = validate_block(data)
-        except ValueError as err:
-            raise HostError(f"write_range: {err}") from err
-        worksheet = self.workbook.Worksheets(sheet)
-        anchor = worksheet.Range(start_cell)
-        chunks = self._write_block(worksheet, int(anchor.Row),
-                                   int(anchor.Column), data)
-        return {"rows": len(data), "columns": width, "chunks": chunks}
-
-    def _write_block(self, worksheet: Any, base_row: int, base_column: int,
-                     data: list[list[Any]]) -> int:
-        """Chunked Value2 writes; shared by write_range and batch staging."""
-        width = len(data[0])
-        chunks = 0
-        for chunk in plan_write_chunks(len(data), width,
-                                       MAX_WRITE_CELLS_PER_CHUNK):
-            piece = tuple(
-                tuple(row[chunk.column_start:chunk.column_end])
-                for row in data[chunk.row_start:chunk.row_end])
-            first = worksheet.Cells(base_row + chunk.row_start,
-                                    base_column + chunk.column_start)
-            last = worksheet.Cells(base_row + chunk.row_end - 1,
-                                   base_column + chunk.column_end - 1)
-            worksheet.Range(first, last).Value2 = piece
-            chunks += 1
-        return chunks
-
-    @_wrap_com("reset sheets")
-    def reset_sheets(self) -> dict[str, Any]:
-        """Clear every worksheet's cells while keeping injected modules.
-
-        A cheap between-tests reset: new_workbook costs a workbook plus
-        module reinjection; this costs a few Clear calls.
-        """
-        self._require_workbook()
-        sheets = self.workbook.Worksheets
-        cleared = 0
-        for index in range(1, int(sheets.Count) + 1):
-            sheets.Item(index).Cells.Clear()
-            cleared += 1
-        return {"cleared_sheets": cleared}
-
-    # ----- batch execution -------------------------------------------------
-
-    @_wrap_com("run VBA batch")
     def run_batch(self, calls: list[dict[str, Any]]) -> str:
-        """Stage encoded calls, run the generated batch dispatcher once.
-
-        Returns the dispatcher's JSON array string. Staging goes through the
-        very hidden batch sheet with type-prefixed text cells (exact
-        round-trip fidelity; see codegen.encode_batch_arg) and the chunked
-        writer (the post-macro Value2 wedge applies to staging too).
-        """
-        self._require_workbook()
-        if len(calls) > codegen.MAX_BATCH_CALLS:
-            raise HostError(
-                f"run_batch supports at most {codegen.MAX_BATCH_CALLS} "
-                f"calls, got {len(calls)}.")
-        entries: list[tuple[str, str, vbasig.ProcedureSignature, int]] = []
-        rows: list[list[Any]] = []
-        for index, call in enumerate(calls):
-            target = str(call["target"])
-            encoded_args = [str(a) for a in call.get("args", [])]
-            codegen.validate_run_target(target)
-            if len(encoded_args) > codegen.MAX_RUN_ARGS:
-                raise HostError(
-                    f"Batch call {index} has {len(encoded_args)} arguments; "
-                    f"the limit is {codegen.MAX_RUN_ARGS}.")
-            module, proc, signature = self._resolve_target(target)
-            if not signature.accepts(len(encoded_args)):
-                raise HostError(
-                    f"Batch call {index}: {module}.{proc} takes "
-                    f"{signature.arity_text()} argument(s); "
-                    f"{len(encoded_args)} were supplied.")
-            entries.append((module, proc, signature, len(encoded_args)))
-            row: list[Any] = [f"{module}.{proc}", len(encoded_args)]
-            row.extend(encoded_args)
-            row.extend([""] * (codegen.MAX_RUN_ARGS - len(encoded_args)))
-            rows.append(row)
-
-        self._ensure_support()
-        key_set = frozenset(
-            codegen.batch_call_key(m, p, n) for m, p, _s, n in entries)
-        if self._batch_signature != key_set:
-            self._write_module(codegen.BATCH_MODULE_NAME,
-                               codegen.batch_module_source(entries),
-                               "standard")
-            self._batch_signature = key_set
-        self._ensure_progress_path()
-        self._ensure_coverage()
-        sheet = self._batch_sheet()
-        self._write_block(sheet, 1, 1, rows)
-        ref = codegen.qualified_run_ref(
-            str(self.workbook.Name), codegen.BATCH_MODULE_NAME,
-            codegen.BATCH_ENTRY)
-        return str(self.app.Run(ref, len(calls)))
-
-    def _batch_sheet(self) -> Any:
-        sheets = self.workbook.Worksheets
-        for index in range(1, int(sheets.Count) + 1):
-            candidate = sheets.Item(index)
-            if str(candidate.Name) == codegen.BATCH_SHEET_NAME:
-                return candidate
-        sheet = sheets.Add()
-        sheet.Name = codegen.BATCH_SHEET_NAME
-        sheet.Visible = 2  # xlSheetVeryHidden: invisible even in the UI list
-        return sheet
+        raise HostError(
+            f"Batch execution is not available for {self.app_key}: it stages "
+            "arguments on a hidden worksheet, which only Excel has. Use "
+            "run() per call.")
 
     # ----- module export and coverage --------------------------------------
 
     @_wrap_com("export modules")
     def export_modules(self, directory: str) -> dict[str, Any]:
         """Export every non-harness component via VBIDE Export."""
-        self._require_workbook()
-        extensions = {1: ".bas", 2: ".cls", 3: ".frm", 100: ".cls"}
+        self._require_document()
         reserved = {n.lower() for n in codegen.HARNESS_MODULE_NAMES}
         exported: list[str] = []
-        components = self.workbook.VBProject.VBComponents
+        components = self._components()
         for index in range(1, int(components.Count) + 1):
             component = components.Item(index)
             name = str(component.Name)
             if name.lower() in reserved:
                 continue
-            extension = extensions.get(int(component.Type))
+            extension = self.module_extensions.get(int(component.Type))
             if extension is None:
                 continue
             target = str(Path(directory) / f"{name}{extension}")
@@ -697,18 +654,21 @@ class ExcelHost:
 
     @_wrap_com("set visibility")
     def set_visible(self, visible: bool) -> dict[str, Any]:
+        if not visible and not self.can_hide:
+            # Reporting success for something that did not happen would make
+            # the trace lie; the supervisor surfaces this as a no-op.
+            return {"visible": True, "supported": False}
         self.app.Visible = visible
-        return {"visible": bool(self.app.Visible)}
+        return {"visible": bool(self.app.Visible), "supported": True}
 
     @_wrap_com("list procedures")
     def list_procs(self, module: str) -> list[dict[str, Any]]:
-        self._require_workbook()
-        component = self._find_component(
-            self.workbook.VBProject.VBComponents, module)
+        self._require_document()
+        component = self._find_component(self._components(), module)
         if component is None:
             raise HostError(
-                f"Module {module!r} does not exist in this workbook's "
-                "VBA project.")
+                f"Module {module!r} does not exist in this "
+                f"{self.document_noun}'s VBA project.")
         found = []
         for signature in vbasig.list_procedures(
                 self._module_source(component)):
@@ -725,18 +685,18 @@ class ExcelHost:
     def start_compile(self) -> str:
         """Make the VBE visible and execute its Compile command control.
 
-        Excel must be visible for the Compile error dialog to surface as a
+        The host must be visible for the Compile error dialog to surface as a
         detectable window (XLIDE oracle lesson: hidden hosts convert compile
         rejections into silent false accepts). Returns "already-compiled"
         when the Compile control is disabled, which the VBE does exactly when
         the project is fully compiled; otherwise fires the compile and
         returns "fired". The caller owns the watch window and the verdict.
         """
-        self._require_workbook()
-        self.app.Visible = True
+        self._require_document()
+        self._set_quietly("Visible", True)
         vbe = self.app.VBE
         vbe.MainWindow.Visible = True
-        vbe.ActiveVBProject = self.workbook.VBProject
+        self._activate_vbproject(vbe)
         control = self._find_compile_control(vbe)
         if control is None:
             raise HostError(
@@ -745,6 +705,10 @@ class ExcelHost:
             return "already-compiled"
         control.Execute()
         return "fired"
+
+    def _activate_vbproject(self, vbe: Any) -> None:
+        """Point the VBE at the project the harness owns."""
+        raise NotImplementedError
 
     def compile_control_disabled(self) -> bool:
         """True when the Compile control has gone disabled.
@@ -789,8 +753,23 @@ class ExcelHost:
 
     @_wrap_com("hide VBE")
     def end_compile(self) -> None:
+        """Put the host back to hidden, main window before the VBE.
+
+        Order matters. Hiding the VBE first and the host second makes the
+        VBE window reappear on its own: measured 2026-08-18, hidden at
+        t=1.02 s and visible again at t=1.17 s, after which the watcher
+        reported a debugger break and killed a healthy session on a later
+        run. Hiding the host first removes what pulls the VBE back up.
+        """
+        if self.can_hide:
+            self._set_quietly("Visible", False)
+        self.hide_vbe()
+
+    def hide_vbe(self) -> bool:
+        """Hide the VBE main window; True when it is confirmed hidden."""
         try:
-            self.app.VBE.MainWindow.Visible = False
+            window = self.app.VBE.MainWindow
+            window.Visible = False
+            return not bool(window.Visible)
         except com_error:
-            pass
-        self.app.Visible = False
+            return False

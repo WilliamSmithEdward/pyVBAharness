@@ -1,21 +1,21 @@
 ﻿# pyVBAharness
 
-Run VBA in desktop Excel from Python, under a supervisor that enforces a
-deadline on every call.
+Run VBA in desktop Excel, Word, PowerPoint and Access from Python, under a
+supervisor that enforces a deadline on every call.
 
-Excel automation has three failure modes that ordinary error handling does
+Office automation has three failure modes that ordinary error handling does
 not cover:
 
 - A VBA runtime error opens a modal dialog and waits indefinitely.
 - `Application.Run` takes no timeout parameter.
-- Excel created over COM is not a child process, so terminating the caller
-  leaves `EXCEL.EXE` running with the workbook open.
+- An Office application created over COM is not a child process, so
+  terminating the caller leaves `EXCEL.EXE` running with the document open.
 
 The harness addresses each one. VBA errors are trapped inside VBA and
 returned as data. Every command is issued from a supervisor process that
 holds no COM references, so it can always enforce a deadline. When a
-deadline expires, the Excel process the harness owns is terminated by
-recorded process ID.
+deadline expires, the process the harness owns is terminated by recorded
+process ID.
 
 ```python
 from pyvbaharness import ExcelSession
@@ -31,18 +31,63 @@ End Function
     result.value     # 42
 ```
 
+The same API drives the other three hosts:
+
+```python
+from pyvbaharness import AccessSession, PowerPointSession, WordSession
+
+with WordSession() as word:
+    word.run_vba(source, proc="Main")
+```
+
+## Supported applications
+
+| | Excel | Word | PowerPoint | Access |
+| --- | --- | --- | --- | --- |
+| Class | `ExcelSession` | `WordSession` | `PowerPointSession` | `AccessSession` |
+| Runs hidden | yes | yes | no | yes |
+| Concurrent sessions and `SessionPool` | yes | yes | no | yes |
+| Needs the Trust Center setting below | yes | yes | yes | no |
+| `save_as` | `.xlsm`, `.xlsb` | `.docm`, `.dotm` | `.pptm`, `.potm` | not applicable |
+| Ranges and `run_batch` | yes | no | no | no |
+
+Injection, managed runs, trapped VBA errors with source lines and stacks,
+coverage, progress reporting, timeouts, compile checks, module export and
+the pytest plugin work identically on all four.
+
+Two PowerPoint limits are properties of PowerPoint, not choices. It refuses
+`Application.Visible = False`, so its runs happen on screen. A second COM
+activation returns the process that is already running rather than starting
+a new one, so a PowerPoint session cannot run alongside another one or
+inside a `SessionPool`, and cannot start at all while you have PowerPoint
+open. The harness refuses in that case instead of taking ownership of a
+process it did not create, because a timeout kills the process it owns.
+
+Access differs in two ways worth knowing before use. It has no unsaved
+document, so `new_document()` creates a scratch `.accdb` in a temp directory
+and deletes it at teardown. Injecting a module writes into the database file
+immediately rather than at save time, so `open_document` requires an
+explicit `read_only=False` rather than quietly writing to a database you
+asked not to change.
+
+Outlook and Publisher are not supported. Outlook is single-instance per
+user and has no per-document VBA project, so owning it would mean owning
+your mail client. Publisher exposes no VBA project on its documents and
+retires in October 2026.
+
 ## Requirements
 
 - Windows.
-- Desktop Excel. Tested against Microsoft 365 x64; 2016 and newer expected
-  to work.
+- The desktop application you want to drive. Tested against Microsoft 365
+  x64; 2016 and newer expected to work.
 - Python 3.10 or newer. Tested on 3.14.
 - `pywin32`, installed as a dependency.
 
 ### Trust access to the VBA project object model
 
-Module injection goes through the VBA project object model, which Excel
-blocks by default. Enable it at:
+Module injection goes through the VBA project object model, which Excel,
+Word and PowerPoint block by default. Enable it in each application you
+intend to use, at:
 
 ```text
 File > Options > Trust Center > Trust Center Settings > Macro Settings
@@ -50,13 +95,15 @@ File > Options > Trust Center > Trust Center Settings > Macro Settings
 ```
 
 The first run fails with a message naming this setting if it is off. The
-setting is per Office application and per Windows user; enabling it for
-Excel does not affect Word, and enabling it for one account does not affect
-a service account. While enabled, any code running as that user can modify
-VBA projects, so it suits a development machine rather than a shared server.
+setting is per application and per Windows user: enabling it for Excel does
+not affect Word, and enabling it for one account does not affect a service
+account. Access has no such option, because its VBA project is always
+reachable. While enabled, any code running as that user can modify VBA
+projects, so it suits a development machine rather than a shared server.
 
 Run `python -m pyvbaharness doctor` to verify this and the rest of the
-environment.
+environment. It reports every host it finds and the ones it does not, and
+an application you have not installed is a warning rather than a failure.
 
 ## Install
 
@@ -191,7 +238,29 @@ Public Sub Recalculate()
 End Sub
 ```
 
-## Workbooks and ranges
+## Documents
+
+Every host opens and creates documents through the same two methods.
+
+```python
+word.open_document(r"C:\reports\report.docm", read_only=True)
+word.run_macro("Report.Rebuild", timeout=120)
+word.save_as(r"C:\out\rebuilt.docm")
+```
+
+Documents open read-only by default and close without saving unless
+`save_as` is called. `save_as` accepts only macro-enabled formats, because
+the others drop the VBA project silently while alerts are suppressed.
+
+Modules can be exported to and imported from `.bas` and `.cls` files on any
+host:
+
+```python
+word.export_modules("vba/")   # VBIDE export, for version control
+word.import_modules("vba/")   # document modules are skipped
+```
+
+## Workbooks and ranges (Excel)
 
 ```python
 excel.open_workbook(r"C:\reports\model.xlsm", read_only=True)
@@ -203,17 +272,11 @@ excel.write_range("Sheet1", "A1", [[1, 2], [3, 4]])
 excel.save_as(r"C:\out\result.xlsm")
 ```
 
-Workbooks open read-only by default and close without saving unless
-`save_as` is called. Range reads and writes transfer whole blocks in one COM
-call. `reset_sheets()` clears all worksheets while keeping injected modules,
-for use between tests.
-
-Modules can be exported to and imported from `.bas` and `.cls` files:
-
-```python
-excel.export_modules("vba/")   # VBIDE export, for version control
-excel.import_modules("vba/")   # document modules are skipped
-```
+`new_workbook` and `open_workbook` are Excel's names for `new_document` and
+`open_document`; both spellings work. Range reads and writes transfer whole
+blocks in one COM call. `reset_sheets()` clears all worksheets while keeping
+injected modules, for use between tests. These four methods exist on
+`ExcelSession` alone, since no other host has a grid.
 
 ## Testing
 
@@ -282,9 +345,10 @@ Input strategies are derived from the parsed VBA signature. Hypothesis
 shrinks failures to a minimal counterexample. Requires
 `pip install pyvbaharness[fuzz]`.
 
-## Batch execution
+## Batch execution (Excel)
 
-`run_batch` runs many calls in one COM round trip. Results are returned in
+`run_batch` runs many calls in one COM round trip. It stages its arguments
+on a hidden worksheet, so it is available on `ExcelSession` only. Results are returned in
 call order with the same detail as `run_macro`, including per-call errors
 with line and stack.
 
@@ -294,15 +358,16 @@ results = excel.run_batch([
 ])
 ```
 
-Measured against equivalent serial calls: 2.7x at 50 calls, 4.7x at 200,
-9.9x at 3000, where per-call cost reaches 0.066 ms. Arguments must be
-scalars.
+Measured against equivalent serial calls: 5.4x at 200 calls and 47x at
+1000, where per-call cost falls to 0.062 ms. Arguments must be scalars.
 
 ## Parallel execution
 
-`SessionPool` distributes work across several owned Excel instances. Each
-member is a full session with its own process, watchdogs, and recovery, so a
-hang recycles one member while the others continue.
+`SessionPool` distributes work across several owned instances. Each member
+is a full session with its own process, watchdogs, and recovery, so a hang
+recycles one member while the others continue. Pass `app=` to pool a host
+other than Excel; a PowerPoint pool larger than one member is refused,
+because PowerPoint cannot produce a second process.
 
 ```python
 from pyvbaharness import SessionPool
@@ -321,8 +386,8 @@ with SessionPool(4) as pool:
     )[-1])
 ```
 
-Throughput on a 16-core machine with 120 ms tasks: 2.0x at two members, 3.6x
-at four, 4.7x at six (`benchmarks/output/pool-baseline-1.0.0.json`). Each
+Throughput on a 16-core machine with 120 ms tasks: 2.0x at two members, 3.7x
+at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.0.json`). Each
 member uses 150 to 300 MB of RAM. Compile checks remain serialized
 machine-wide inside a pool because they drive the visible VBE, which is a
 shared surface; hidden runs and range IO do not interfere with each other.
@@ -398,6 +463,23 @@ blocked dialog or a timeout, a screenshot of the Excel window is captured
 where possible and referenced from the result, which is the practical way to
 see an Excel prompt whose text cannot be read.
 
+## Avoiding wedges
+
+Prompts that can be prevented are prevented rather than dismissed, because
+Office's own dialogs draw their controls inside a NetUI surface with no
+Win32 buttons: the harness can see them and cannot click them. Alerts, link
+prompts, AutoRecover and feature-install prompts are all turned off before a
+document exists, and each host's teardown removes what would otherwise raise
+a save prompt.
+
+Where a prompt cannot be prevented, the harness prefers a signal the system
+reports exactly over a sampled guess: it waits on the process handle for
+exit rather than polling, treats the VBE disabling its Compile control as
+proof a compile finished, and holds its modal check exactly as long as a
+clicked dialog still exists. Deadlines remain as the backstop for the one
+case no signal covers, a COM call into a blocked apartment, which cannot be
+interrupted from inside the process making it.
+
 ## Process ownership
 
 The harness creates its own Excel instance and never attaches to a running
@@ -420,40 +502,47 @@ workbook. Workbook-qualified targets are rejected before any COM call.
 ## Performance
 
 Measured on Excel 365 x64 with Python 3.14
-(`benchmarks/output/baseline-1.0.0.json`):
+(`benchmarks/output/baseline-1.1.0.json`):
 
 | Operation | Median |
 | --- | --- |
-| Session startup and teardown | 0.5 s warm, ~3 s cold |
+| Session startup and teardown | 3.0 s (0.6 s to start, 2.4 s for Excel to exit) |
 | Run a procedure, same target as previous call | 0.5 ms |
-| Run a procedure with arguments | 0.7 ms |
-| `run_vba` with unchanged source | 0.9 ms |
-| Run a different target (dispatcher regenerated) | 76 ms |
-| Batched calls, 1000 per batch | 0.094 ms each |
-| Compile check, clean project | 1.0 s |
-| Write 10,000 cells | 63 ms |
-| Read 10,000 cells | 9 ms |
+| Run a procedure with arguments | 0.6 ms |
+| `run_vba` with unchanged source | 0.7 ms |
+| Run a different target (dispatcher regenerated) | 77 ms |
+| Batched calls, 1000 per batch | 0.062 ms each |
+| Compile check, clean project | 0.9 s |
+| Write 10,000 cells | 66 ms |
+| Read 10,000 cells | 8 ms |
+
+Most of a session's lifetime cost is Excel exiting, not starting: Quit
+returns well before the process does, and teardown waits on the process
+handle to confirm termination rather than assuming it. Reuse a session
+across runs, or a `SessionPool`, if that matters.
 
 Per-run cost depends on three caches: resolved target signatures, injected
 source, and the generated dispatcher. Repeated calls to the same target with
 unchanged source hit all three. Changing the target regenerates the
-dispatcher, which accounts for the 97 ms figure.
+dispatcher, which accounts for the 77 ms figure.
 
 ## Development
 
 ```bash
-python -m pytest tests/unit                          # 147 tests, no Excel
-python -m pytest tests/live -m live -o addopts=""    # 58 tests, real Excel
+python -m pytest tests/unit                          # 176 tests, no Office
+python -m pytest tests/live -m live -o addopts=""    # 117 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
 ```
 
 The unit suite covers dialog policy, trace validation, signature parsing,
-code generation, source instrumentation, and write chunking, plus the
-supervisor state machine driven by a fake worker that speaks the same pipe
-protocol. The live suite covers real Excel behavior, including deliberate
-hangs, blocking dialogs, and a worker terminated mid-run; it asserts that no
-Excel processes survive.
+code generation, source instrumentation, write chunking and the per-app
+capability table, plus the supervisor state machine driven by a fake worker
+that speaks the same pipe protocol. The live suite covers real behavior on
+all four hosts, including deliberate hangs, blocking dialogs, and a worker
+terminated mid-run; it asserts that no Office processes survive. Running it
+opens and closes real applications, and the PowerPoint tests put a window on
+screen.
 
 ## Documentation
 
@@ -461,7 +550,7 @@ Excel processes survive.
 | --- | --- |
 | [Architecture](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/architecture.md) | Process model, hang-resistance layers, design rationale |
 | [Troubleshooting](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/troubleshooting.md) | What each failure means and what to do about it |
-| [Implementation guide](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Excel behaviors |
+| [Implementation guide](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Office behaviors |
 | [Releasing](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
 
 ## License

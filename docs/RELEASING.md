@@ -57,9 +57,13 @@ accidental release.
    Confirm the live run left nothing behind:
 
    ```powershell
-   Get-Process EXCEL -ErrorAction SilentlyContinue
+   Get-Process EXCEL, WINWORD, POWERPNT, MSACCESS -ErrorAction SilentlyContinue
    Get-ChildItem "$env:LOCALAPPDATA\pyvbaharness\sessions"
    ```
+
+   The live suite needs Excel, Word, PowerPoint and Access installed, and it
+   opens PowerPoint on screen because PowerPoint cannot be hidden. Run it in
+   the foreground; the whole suite takes 4 to 5 minutes.
 
 3. Refresh the benchmark baselines if anything touched the run path, and
    update the numbers quoted in the README:
@@ -110,8 +114,8 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 
 ## Limits worth knowing
 
-CI cannot validate against real Excel. Hosted runners have no Office
-installation, so the 58 live tests, which are the ones that actually prove
+CI cannot validate against real Office. Hosted runners have no Office
+installation, so the 117 live tests, which are the ones that actually prove
 the harness works, only ever run on a developer machine. Treat a green CI
 badge as "the pure logic is intact and the package builds", not as "the
 harness works".

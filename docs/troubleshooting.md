@@ -102,7 +102,7 @@ names the stage. Frequent cases:
 
 - `Module 'X' does not exist in this workbook's VBA project`: the target
   module was never added, or the workbook was replaced by a later
-  `new_workbook()` or `open_workbook()` call, which clears injected modules.
+  `new_document()` or `open_document()` call, which clears injected modules.
 - `X.Y is not a callable Sub, Function, or Property Get`: the target is a
   `Property Let` or `Property Set`, or the name is misspelled.
 - `X.Y takes 2 argument(s); 3 were supplied`: arity is checked against the
@@ -122,7 +122,35 @@ is simply slow, raise the deadline for that call:
 excel.run_macro("Model.Recalculate", timeout=600)
 ```
 
-## Excel processes pile up
+## "PowerPoint is single-instance"
+
+A second COM activation of PowerPoint returns the process already running
+instead of starting a new one. The harness kills the process it owns when a
+run times out, so it will not adopt a process it did not create.
+
+What this means in practice:
+
+- Close PowerPoint before running a PowerPoint session.
+- Only one PowerPoint session can exist at a time. `SessionPool` with more
+  than one member and `app="powerpoint"` is refused up front.
+- PowerPoint runs on screen. `Application.Visible = False` is refused by
+  PowerPoint itself, and the `app-created` event reports `can_hide: false`
+  rather than claiming otherwise.
+
+Excel, Word and Access have none of these limits.
+
+## Access refuses `read_only=True`
+
+Injecting VBA into an Access database writes to the file immediately, not at
+save time, and Access has no read-only automation mode. Rather than open a
+database read-write after being asked for read-only, `open_document` fails
+and says so. Pass `read_only=False` to confirm you intend to modify the
+file, and prefer running against a copy.
+
+`save_as` is refused for the same underlying reason: Access has already
+written everything. Copy the `.accdb` if you need a snapshot.
+
+## Office processes pile up
 
 They should not, even across crashes. Each owned Excel sits in a kernel job
 object with kill-on-close, so the kernel terminates it the moment its worker
@@ -159,7 +187,7 @@ located.
 $env:PYVBAHARNESS_STACK_DUMP_S = "10"
 ```
 
-## Known Excel behaviors the harness works around
+## Known Office behaviors the harness works around
 
 These were measured on Excel 365 x64 and are handled for you; they are listed
 so surprising behavior in your own automation code is recognizable.

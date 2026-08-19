@@ -3,7 +3,7 @@
 Pure ctypes GDI plus a minimal stdlib PNG encoder, so it works from any
 thread of any process with no COM and no imaging dependency: the worker's
 watcher thread captures a blocking dialog before it is reported, and the
-supervisor captures the (possibly hidden) Excel main window before a
+supervisor captures the (possibly hidden) application main window before a
 timeout kill.
 
 PrintWindow with PW_RENDERFULLCONTENT asks the window to render even when
@@ -57,7 +57,12 @@ class _BITMAPINFOHEADER(ctypes.Structure):
 
 
 def find_window_for_pid(pid: int, class_name: str = "XLMAIN") -> int:
-    """Top-level window handle of the given class owned by the PID, or 0."""
+    """Top-level window handle owned by the PID, or 0.
+
+    An empty ``class_name`` matches the first top-level window of the
+    process, which is the fallback when an app's main-window class is not
+    known.
+    """
     found = wt.HWND(0)
 
     def callback(hwnd: int, _lparam: int) -> bool:
@@ -65,6 +70,9 @@ def find_window_for_pid(pid: int, class_name: str = "XLMAIN") -> int:
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
         if owner.value != pid:
             return True
+        if not class_name:
+            found.value = hwnd
+            return False
         buffer = ctypes.create_unicode_buffer(256)
         _user32.GetClassNameW(hwnd, buffer, 256)
         if buffer.value == class_name:
@@ -163,7 +171,7 @@ def capture_window_safely(hwnd: int, path: str | Path,
                           timeout_s: float = 3.0) -> str | None:
     """capture_window on a daemon thread with a hard timeout.
 
-    A capture must never delay killing a wedged Excel, so a GDI call that
+    A capture must never delay killing a wedged host, so a GDI call that
     blocks past the timeout is simply abandoned (the thread is a daemon and
     dies with the process).
     """
@@ -182,10 +190,24 @@ def capture_window_safely(hwnd: int, path: str | Path,
     return None if worker.is_alive() else result[0]
 
 
-def capture_excel_window(pid: int, directory: str | Path,
-                         label: str) -> str | None:
-    """Find the Excel main window of a PID and capture it, best effort."""
-    hwnd = find_window_for_pid(pid, "XLMAIN")
+# Main-window class per host. A capture falls back to any top-level window
+# of the process when the class is unknown, so an unlisted app still yields
+# a postmortem image rather than nothing.
+MAIN_WINDOW_CLASSES = {
+    "excel": "XLMAIN",
+    "word": "OpusApp",
+    "powerpoint": "PPTFrameClass",
+    "access": "OMain",
+}
+
+
+def capture_app_window(pid: int, directory: str | Path, label: str,
+                       app: str = "excel") -> str | None:
+    """Find the application main window of a PID and capture it."""
+    class_name = MAIN_WINDOW_CLASSES.get(app, "")
+    hwnd = find_window_for_pid(pid, class_name) if class_name else 0
+    if not hwnd:
+        hwnd = find_window_for_pid(pid, "")
     if not hwnd:
         return None
     stamp = time.strftime("%Y%m%d-%H%M%S")

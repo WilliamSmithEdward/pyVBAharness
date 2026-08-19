@@ -2,6 +2,9 @@
 
 Commands:
   doctor            diagnose the environment (add --live for a real smoke run)
+                    Reports every installed host: Excel, Word, PowerPoint,
+                    Access. A host you do not have is a warning, not a
+                    failure.
   run FILE          run a procedure from a .bas/.vba source file
   check FILE...     compile-check source files in a fresh workbook
   check --workbook  compile-check an existing workbook's VBA project
@@ -16,6 +19,8 @@ import argparse
 import sys
 import time
 from pathlib import Path
+
+from . import apps
 
 
 def _print(line: str = "") -> None:
@@ -52,29 +57,48 @@ def _doctor_checks() -> list[tuple[str, bool | None, str]]:
         rows.append(("pywin32 importable", False,
                      f"{err}; pip install pywin32"))
 
-    progid = _read_registry(winreg.HKEY_LOCAL_MACHINE,
-                            r"SOFTWARE\Classes\Excel.Application\CurVer", None)
-    rows.append(("Excel installed", progid is not None,
-                 str(progid or "Excel.Application ProgID not registered")))
-
     office_version = ""
-    if isinstance(progid, str) and progid.rsplit(".", 1)[-1].isdigit():
-        office_version = progid.rsplit(".", 1)[-1] + ".0"
-    if office_version:
+    for detail in apps.APPS.values():
+        progid = _read_registry(
+            winreg.HKEY_LOCAL_MACHINE,
+            rf"SOFTWARE\Classes\{detail.progid}\CurVer", None)
+        installed = progid is not None
+        note = str(progid or "not installed")
+        if installed and not detail.multi_instance:
+            note += " (single-instance: one session at a time, no pool)"
+        if installed and not detail.can_hide:
+            note += " (cannot be hidden: runs on screen)"
+        # A missing app is a warning, not a failure: nobody needs all four.
+        rows.append((f"{detail.label} installed", True if installed else None,
+                     note))
+        if (installed and not office_version and isinstance(progid, str)
+                and progid.rsplit(".", 1)[-1].isdigit()):
+            office_version = progid.rsplit(".", 1)[-1] + ".0"
+
+    for detail in apps.APPS.values():
+        if not detail.needs_vbom:
+            continue
+        progid = _read_registry(
+            winreg.HKEY_LOCAL_MACHINE,
+            rf"SOFTWARE\Classes\{detail.progid}\CurVer", None)
+        label = f"{detail.label}: trust access to the VBA project"
+        if progid is None:
+            continue
+        if not office_version:
+            rows.append((label, None, "could not determine the Office version"))
+            continue
         access = _read_registry(
             winreg.HKEY_CURRENT_USER,
-            rf"Software\Microsoft\Office\{office_version}\Excel\Security",
+            rf"Software\Microsoft\Office\{office_version}"
+            rf"\{detail.security_key}\Security",
             "AccessVBOM")
         rows.append((
-            "Trust access to the VBA project object model",
+            label,
             access == 1,
             "enabled" if access == 1 else
-            "DISABLED. File > Options > Trust Center > Trust Center "
-            "Settings > Macro Settings > tick 'Trust access to the VBA "
-            "project object model'."))
-    else:
-        rows.append(("Trust access to the VBA project object model", None,
-                     "could not determine the Office version"))
+            f"DISABLED. In {detail.label}: File > Options > Trust Center > "
+            "Trust Center Settings > Macro Settings > tick 'Trust access to "
+            "the VBA project object model'."))
 
     # VBE error-trapping mode. 1 = Break on All Errors, which stops in the
     # debugger even for handled errors: every managed run would report

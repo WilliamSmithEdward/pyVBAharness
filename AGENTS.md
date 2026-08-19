@@ -7,7 +7,7 @@ These instructions apply to the entire repository.
 **Before editing anything under `src/pyvbaharness/`, read
 [docs/IMPLEMENTATION_GUIDE.md](docs/IMPLEMENTATION_GUIDE.md).**
 
-It is the how-to for this codebase: the catalog of measured Excel
+It is the how-to for this codebase: the catalog of measured Office
 behaviors that shaped the design (each one cost real debugging time and is
 guarded by a live test), the invariants that must not break, a worked
 recipe for adding a capability end to end, the rules for changing generated
@@ -34,14 +34,19 @@ Keep both mostly invisible in user-facing wording.
 
 ## Mission
 
-pyVBAharness runs VBA inside real desktop Excel without hanging the calling
-process. When goals conflict, the priority is hang resistance, then accuracy,
-then performance. Make the smallest coherent change that preserves that
-order.
+pyVBAharness runs VBA inside real desktop Excel, Word, PowerPoint and
+Access without hanging the calling process. When goals conflict, the
+priority is hang resistance, then accuracy, then performance. Make the
+smallest coherent change that preserves that order.
+
+Per-app differences belong in `worker/hosts/<app>.py` and in the capability
+table in `apps.py`, never as conditionals scattered through the supervisor.
+Anything measured about one app goes in the catalog with its date, plus a
+live test.
 
 ## Project specifics
 
-- Toolchain: Python 3.10+, pywin32, Windows desktop Excel.
+- Toolchain: Python 3.10+, pywin32, Windows desktop Office.
 - Unit tests (no Excel): `python -m pytest tests/unit`
 - Live tests (real Excel): `python -m pytest tests/live -m live -o addopts=""`
 - Benchmarks: `python benchmarks/run_benchmarks.py --out benchmarks/output/<name>.json`
@@ -64,7 +69,7 @@ Do not weaken these without changing the documented contract in the same
 change:
 
 - The harness creates its own Excel instance and never attaches to a running
-  one. `ExcelHost.create` proves this with a PID snapshot and refuses
+  one. `OfficeHost._prove_owned` proves this with a PID snapshot and refuses
   otherwise.
 - The owned Excel lives inside a kill-on-close kernel job tied to the worker
   process, so worker death of any kind reaps Excel. Do not remove the job

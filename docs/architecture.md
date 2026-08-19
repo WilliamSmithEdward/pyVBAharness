@@ -1,6 +1,7 @@
 # pyVBAharness Architecture
 
-pyVBAharness is a Python harness that runs VBA inside real desktop Excel with
+pyVBAharness is a Python harness that runs VBA inside real desktop Excel,
+Word, PowerPoint and Access with
 three explicit goals, in priority order when they conflict: hang resistance,
 accuracy, performance. This document records the design, the reasoning, and the
 provenance of each load-bearing decision.
@@ -268,6 +269,39 @@ remains open, so a creation-time query is identity, not liveness.
 `is_process_alive` uses `GetExitCodeProcess` against `STILL_ACTIVE`; without
 it, teardown checks reported a dead Excel as alive.
 
+## Host adapters
+
+One supervisor and one worker serve four applications. Everything that is
+the same across them lives in `worker/hosts/base.py`: creating and proving
+ownership of an instance, the kill-on-close job, module injection, the
+generated dispatcher, coverage, progress, `Application.Run`, module export
+and the VBE compile check. Each app then supplies a small adapter with what
+it genuinely does differently.
+
+| Seam | Why it exists |
+| --- | --- |
+| `_configure_app` | each app spells alert suppression differently, and Word has a list of its own prompt sources to disable |
+| `_components` | Excel, Word and PowerPoint hang the VBA project off the document; Access hangs it off the application |
+| `_run_ref` | no single `Application.Run` reference string works on all four |
+| `_invoke_run` | Access cannot be called through pywin32's dispatch wrapper |
+| document lifecycle | Workbooks, Documents, Presentations, and a database that is a file |
+
+`apps.py` holds the capability table (ProgID, image name, whether the app
+can hide, whether it can produce a second instance, whether it has a VBOM
+gate). It imports nothing, so the supervisor, the pool and the CLI can read
+it without touching COM, and a host takes its identity from it rather than
+repeating it.
+
+The rule for new work: a per-app difference belongs in one adapter or in
+the capability table, never as a conditional in the supervisor. The
+supervisor knows the app only as a string it passes to the worker.
+
+Two consequences are worth stating plainly. PowerPoint is single-instance,
+so it cannot be pooled and refuses to start while the user has PowerPoint
+open. Access writes its database continuously, so injection modifies the
+file rather than an in-memory copy, and `open_document` requires an explicit
+`read_only=False`.
+
 ## Performance decisions
 
 - Persistent session. Both references spawn Excel per run (max isolation) and
@@ -286,7 +320,7 @@ it, teardown checks reported a dead Excel as alive.
   runs them from one generated dispatcher in a single COM round trip:
   2.7x faster at 50 calls, 4.7x at 200, 9.9x at 3000 (0.066 ms per call).
   Per-call fidelity is unchanged, including error lines and stacks.
-- Unsaved in-memory workbooks by default. `new_workbook()` never touches disk
+- Unsaved in-memory documents by default. `new_document()` never touches disk
   (the XLIDE syntax oracle uses the same trick to bypass file macro-security
   policy); opening an existing workbook defaults to read-only with
   `UpdateLinks:=0` and no save on close.
@@ -354,7 +388,7 @@ restores hidden mode afterward. Compile outcomes are
 `accepted | rejected (dialog text) | infrastructure-failure`; a timeout is
 infrastructure, never a verdict.
 
-## Excel configuration
+## Office configuration
 
 Applied by the worker to its owned instance:
 
@@ -377,7 +411,7 @@ by the supervisor cleanup watchdog.
 
 ```text
 src/pyvbaharness/
-  __init__.py         public API (ExcelSession, SessionPool, run_vba, results)
+  __init__.py         public API (per-app Sessions, SessionPool, results)
   __main__.py         CLI: doctor / run / check
   session.py          supervisor: worker lifecycle, watchdogs, abort path
   pool.py             SessionPool: N sessions, work queue, sharded run_tests
@@ -390,19 +424,20 @@ src/pyvbaharness/
   dialog_policy.py    pure dialog classification / dismissal decision
   oracle.py           pure trace validator
   process_control.py  taskkill, manifests, stale sweep, kill-on-close job
-  lock.py             session and compile mutexes
+  apps.py             per-app capability table (no COM)
+  lock.py             session, create, and compile mutexes
   screenshot.py       bounded GDI window capture + minimal PNG encoder
   properties.py       Hypothesis strategies from VBA signatures
   pytest_plugin.py    .bas collection as pytest items
   worker/__main__.py  worker entry point, command loop, progress tail
-  worker/excel_host.py  all Excel COM calls
+  worker/hosts/       one COM adapter per app, over a shared base
   worker/watcher.py   ctypes window scanner + dismissal executor
-tests/unit            pure logic, no Excel required (147 tests)
-tests/live            real Excel, opt-in via -m live (58 tests)
+tests/unit            pure logic, no Office required (176 tests)
+tests/live            real Office, opt-in via -m live (117 tests)
 benchmarks/           per-run, batch, and pool scaling measurements
 ```
 
-How to change this codebase, including the full catalog of measured Excel
+How to change this codebase, including the full catalog of measured Office
 behaviors and the recipe for adding a capability end to end, is in
 [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md).
 
@@ -421,7 +456,7 @@ wedge above was traced to the `Value2` assignment rather than guessed at.
 
 ## Known limits (v1)
 
-- Windows desktop Excel only (win32, pywin32).
+- Windows desktop Office only (win32, pywin32).
 - Break-mode code-line capture (ROneCOne's `GetSelection` trick) is not
   implemented: the watcher thread cannot call COM into the blocked STA. A
   break is detected via the VBE window and handled as blocked; the offending

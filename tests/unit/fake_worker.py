@@ -1,8 +1,8 @@
 """Scripted fake worker for supervisor state-machine tests.
 
 Speaks the pyvbaharness pipe protocol with canned behaviors keyed by the run
-target, so ExcelSession's watchdog/abort/recycle logic can be exercised with
-no Excel and no COM. Self-contained on purpose: stdlib only.
+target, so the supervisor's watchdog/abort/recycle logic can be exercised
+with no Office and no COM. Self-contained on purpose: stdlib only.
 """
 import json
 import os
@@ -20,7 +20,7 @@ def emit(kind, **payload):
 
 
 def main():
-    emit("excel-created", pid=os.getpid(), attached=False,
+    emit("app-created", pid=os.getpid(), attached=False,
          display_alerts=False, enable_events=False)
     emit("worker-ready", pid=os.getpid())
     opened = False
@@ -38,9 +38,9 @@ def main():
             emit("command-finished", cid=cid, command=name, outcome="passed",
                  duration_ms=0)
             break
-        if name == "new_workbook":
+        if name == "new_document":
             opened = True
-            emit("workbook-created", name="FakeBook")
+            emit("document-created", name="FakeBook")
             emit("command-finished", cid=cid, command=name, outcome="passed",
                  data={"name": "FakeBook"}, duration_ms=1)
             continue
@@ -54,7 +54,7 @@ def main():
                 emit("modal-blocked", title="Microsoft Excel",
                      message="Overwrite?", texts=["Overwrite?"],
                      buttons=["Yes", "No"], button_ids=[6, 7],
-                     classification="excel-modal",
+                     classification="app-modal",
                      reason="decision-or-unknown-dialog",
                      action="blocked:decision-or-unknown-dialog")
                 time.sleep(600)  # stuck behind the modal
@@ -73,8 +73,8 @@ def main():
         emit("command-finished", cid=cid, command=name, outcome="passed",
              data={}, duration_ms=1)
     if opened:
-        emit("workbook-closed", save_changes=False, duration_ms=1)
-    emit("excel-quit", duration_ms=1)
+        emit("document-closed", save_changes=False, duration_ms=1)
+    emit("app-quit", duration_ms=1)
 
 
 if __name__ == "__main__":

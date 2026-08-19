@@ -1,15 +1,15 @@
 """Owned-process bookkeeping and termination.
 
-Excel launched via COM is not a child of the worker process (DCOM starts it),
-so killing the worker tree never kills Excel. Both reference harnesses solve
-this the same way: discover the Excel PID from the Application window handle,
-record it in a manifest the supervisor can read even when the worker is hung,
-and kill exactly that PID on breach (``taskkill /PID <pid> /T /F``).
+An Office application launched via COM is not a child of the worker process
+(DCOM starts it), so killing the worker tree never kills it. Both reference
+harnesses solve this the same way: discover the host PID, record it in a
+manifest the supervisor can read even when the worker is hung, and kill
+exactly that PID on breach (``taskkill /PID <pid> /T /F``).
 
 PID reuse is guarded by recording the process creation time next to the PID;
 a sweep or kill only acts when both still match. Manifests from crashed runs
-are swept at the next session start so orphaned hidden Excel processes do not
-accumulate.
+are swept at the next session start so orphaned hidden Office processes do
+not accumulate.
 """
 from __future__ import annotations
 
@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_OBJECT_0 = 0x0
 _STILL_ACTIVE = 259
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
@@ -138,9 +140,9 @@ class KillOnCloseJob:
 def process_ids_by_image(image_name: str) -> set[int]:
     """PIDs whose executable file name matches (case-insensitive).
 
-    Used to prove a freshly created Excel really is new: if the PID behind a
-    new Application object already existed, the COM call attached to someone
-    else's Excel and the harness must refuse it.
+    Used to prove a freshly created application really is new: if the PID
+    behind a new Application object already existed, the COM call attached to
+    someone else's instance and the harness must refuse it.
     """
     psapi = ctypes.windll.psapi
     kernel32 = ctypes.windll.kernel32
@@ -196,6 +198,31 @@ def is_process_alive(pid: int) -> bool:
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
             return False
         return code.value == _STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def wait_for_exit(pid: int, timeout_s: float) -> bool:
+    """Block until the process ends, or the timeout expires.
+
+    Deterministic where a poll loop is not: the process handle is a kernel
+    object that becomes signalled at the instant the process exits, so this
+    returns immediately on exit instead of on the next tick of a sleep
+    interval, and burns nothing while it waits.
+
+    Returns True when the process is gone. A handle that cannot be opened is
+    treated as gone only if the process really is (OpenProcess also fails on
+    access denied, which is not the same thing).
+    """
+    if pid <= 0:
+        return True
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not handle:
+        return not is_process_alive(pid)
+    try:
+        result = kernel32.WaitForSingleObject(handle, int(timeout_s * 1000))
+        return result == _WAIT_OBJECT_0
     finally:
         kernel32.CloseHandle(handle)
 
@@ -283,7 +310,7 @@ def sweep_stale_manifests(directory: Path | None = None,
             continue
         if now - float(data.get("written_at", 0)) < stale_after_s:
             continue
-        for role in ("excel", "worker"):
+        for role in ("app", "excel", "worker"):
             record = data.get(role)
             if not isinstance(record, dict):
                 continue

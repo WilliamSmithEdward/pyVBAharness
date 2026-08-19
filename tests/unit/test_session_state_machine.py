@@ -72,7 +72,7 @@ class TestTimeout:
                 warnings.simplefilter("ignore")
                 session.close()
         kinds = [e.get("kind") for e in session.events]
-        assert "excel-killed" in kinds
+        assert "app-killed" in kinds
         # Oracle stays clean: the hang was followed by a kill.
         assert validate_trace(session.events) == []
 

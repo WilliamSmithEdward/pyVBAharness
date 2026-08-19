@@ -2,7 +2,7 @@
 
 Files named ``test_*.bas`` (or ``*_test.bas``) are collected; each
 zero-argument ``Test*`` Sub/Function becomes a pytest item that runs through
-one shared, auto-recycling ExcelSession. VBA assertion failures
+one shared, auto-recycling session. VBA assertion failures
 (PyVbaAssert / PyVbaAssertEqual) report their message, error line, stack,
 and PyVbaLog output; a hanging test reports timeout and costs one recycle,
 not the session.
@@ -104,8 +104,8 @@ class VbaTestItem(pytest.Item):
     def runtest(self) -> None:
         session = _get_session(self.config)
         timeout = float(self.config.getini("vba_test_timeout"))
-        if not session.has_workbook:
-            session.new_workbook()
+        if not session.has_document:
+            session.new_document()
         # Cache no-op normally; reinjection after a prior test's recycle.
         session.add_module(self.module, self.source, line_numbers=True)
         result = session.run_macro(f"{self.module}.{self.name}",

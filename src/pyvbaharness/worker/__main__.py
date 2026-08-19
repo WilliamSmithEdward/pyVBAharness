@@ -1,11 +1,11 @@
 """Worker process entry point: ``python -m pyvbaharness.worker``.
 
 Reads one JSON command per stdin line, emits prefixed JSON events on stdout
-(see protocol.py). All COM lives here, in the main thread's STA; the dialog
-watcher runs as a ctypes-only daemon thread. The worker never enforces run
-timeouts itself: a hung COM call cannot be interrupted from inside, so the
-supervisor watches the event stream and kills this process (and the recorded
-Excel PID) from outside.
+(see protocol.py). ``--app`` selects which Office host to own; all COM lives
+here, in the main thread's STA, and the dialog watcher runs as a ctypes-only
+daemon thread. The worker never enforces run timeouts itself: a hung COM call
+cannot be interrupted from inside, so the supervisor watches the event stream
+and kills this process (and the recorded host PID) from outside.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from typing import Any
 
 from .. import codegen, protocol
 from ..results import PASSED, RUNNER_ERROR, VBA_ERROR
-from .excel_host import ExcelHost, HostError
+from .hosts import HostError, build_host
 from .watcher import DialogWatcher, WatcherRecord
 
 
@@ -118,6 +118,9 @@ def _record_payload(record: WatcherRecord) -> dict[str, Any]:
 def _on_watcher_record(record: WatcherRecord) -> None:
     if record.kind == "vbe-window":
         _emit(protocol.EV_VBE_WINDOW, _record_payload(record))
+    elif record.kind == "vbe-design":
+        # Visible but not in break mode: evidence for the trace, not a block.
+        _emit(protocol.EV_MODAL_DETECTED, _record_payload(record))
     elif record.kind == "opaque-modal":
         _emit(protocol.EV_MODAL_BLOCKED, _record_payload(record))
     elif record.action.startswith("blocked:"):
@@ -129,8 +132,8 @@ def _on_watcher_record(record: WatcherRecord) -> None:
 
 
 class Worker:
-    def __init__(self, artifacts_dir: str = "") -> None:
-        self.host = ExcelHost()
+    def __init__(self, app: str = "excel", artifacts_dir: str = "") -> None:
+        self.host = build_host(app)
         self.watcher: DialogWatcher | None = None
         self.progress_tail: ProgressTail | None = None
         self.artifacts_dir = artifacts_dir
@@ -141,9 +144,10 @@ class Worker:
         self.host.progress_path = os.path.join(
             tempfile.gettempdir(), f"pyvba-progress-{os.getpid()}.log")
         info = self.host.create()
-        _emit(protocol.EV_EXCEL_CREATED, info)
+        _emit(protocol.EV_APP_CREATED, info)
         self.watcher = DialogWatcher(self.host.pid, _on_watcher_record,
-                                     artifacts_dir=self.artifacts_dir)
+                                     artifacts_dir=self.artifacts_dir,
+                                     app=self.host.app_key)
         self.watcher.start()
         self.progress_tail = ProgressTail(self.host.progress_path)
         self.progress_tail.start()
@@ -161,24 +165,24 @@ class Worker:
             pass
         started = time.time()
         try:
-            had_workbook = self.host.workbook is not None
-            self.host.close_workbook()
-            if had_workbook:
-                _emit(protocol.EV_WORKBOOK_CLOSED, {
+            had_document = self.host.document is not None
+            self.host.close_document()
+            if had_document:
+                _emit(protocol.EV_DOCUMENT_CLOSED, {
                     "save_changes": False,
                     "duration_ms": int((time.time() - started) * 1000),
                 })
         except HostError as err:
-            _emit(protocol.EV_PHASE, {"phase": "workbook-close",
+            _emit(protocol.EV_PHASE, {"phase": "document-close",
                                       "outcome": "failed",
                                       "message": str(err)})
         started = time.time()
         try:
             self.host.quit()
-            _emit(protocol.EV_EXCEL_QUIT, {
+            _emit(protocol.EV_APP_QUIT, {
                 "duration_ms": int((time.time() - started) * 1000)})
         except HostError as err:
-            _emit(protocol.EV_PHASE, {"phase": "excel-quit",
+            _emit(protocol.EV_PHASE, {"phase": "app-quit",
                                       "outcome": "failed",
                                       "message": str(err)})
         self.host.release()
@@ -250,14 +254,14 @@ class Worker:
         host = self.host
         if name == protocol.CMD_PING:
             return {"pong": True, "pid": host.pid}
-        if name == protocol.CMD_NEW_WORKBOOK:
-            data = host.new_workbook()
-            _emit(protocol.EV_WORKBOOK_CREATED, data)
+        if name == protocol.CMD_NEW_DOCUMENT:
+            data = host.new_document()
+            _emit(protocol.EV_DOCUMENT_CREATED, data)
             return data
-        if name == protocol.CMD_OPEN_WORKBOOK:
-            data = host.open_workbook(str(params["path"]),
+        if name == protocol.CMD_OPEN_DOCUMENT:
+            data = host.open_document(str(params["path"]),
                                       bool(params.get("read_only", True)))
-            _emit(protocol.EV_WORKBOOK_OPENED, data)
+            _emit(protocol.EV_DOCUMENT_OPENED, data)
             return data
         if name == protocol.CMD_ADD_MODULE:
             return host.add_module(str(params["name"]), str(params["source"]),
@@ -283,7 +287,7 @@ class Worker:
                 raise HostError("The batch dispatcher returned a non-list.")
             return {"results": items}
         if name == protocol.CMD_RESET_SHEETS:
-            return host.reset_sheets()
+            return self._excel_only(host, "reset_sheets")()
         if name == protocol.CMD_EXPORT_MODULES:
             return host.export_modules(str(params["dir"]))
         if name == protocol.CMD_COV_INIT:
@@ -299,12 +303,12 @@ class Worker:
                                 + repr(raw)[:300]) from err
             return {"hits": hits}
         if name == protocol.CMD_READ_RANGE:
-            return {"data": host.read_range(str(params["sheet"]),
-                                            str(params["ref"]))}
+            read = self._excel_only(host, "read_range")
+            return {"data": read(str(params["sheet"]), str(params["ref"]))}
         if name == protocol.CMD_WRITE_RANGE:
-            return host.write_range(str(params["sheet"]),
-                                    str(params["start_cell"]),
-                                    list(params["data"]))
+            write = self._excel_only(host, "write_range")
+            return write(str(params["sheet"]), str(params["start_cell"]),
+                         list(params["data"]))
         if name == protocol.CMD_SAVE_AS:
             return host.save_as(str(params["path"]))
         if name == protocol.CMD_LIST_PROCS:
@@ -316,6 +320,16 @@ class Worker:
                 self.host.ensure_support_module()
             return self._compile(float(params.get("watch_seconds", 10.0)))
         raise ValueError(f"Unknown command: {name}")
+
+    @staticmethod
+    def _excel_only(host: Any, name: str) -> Any:
+        """Resolve a worksheet-only command, or explain why it is missing."""
+        method = getattr(host, name, None)
+        if method is None:
+            raise HostError(
+                f"{name} needs a worksheet grid, which {host.app_key} does "
+                "not have; it is available on ExcelSession only.")
+        return method
 
     def _compile(self, watch_seconds: float) -> dict[str, Any]:
         """Fire VBE Compile and watch for a compile-error dialog.
@@ -370,7 +384,23 @@ class Worker:
             except HostError:
                 pass
             watcher.set_compile_mode(False)
+            # Re-arm VBE reporting only once the VBE window is actually
+            # gone. Hiding it is asynchronous, and clearing suppression the
+            # instant end_compile returns let the watcher see the window
+            # still closing and report it as a debugger break, killing a
+            # healthy session several runs later. The condition is checked
+            # directly rather than waited out.
+            self._await_vbe_hidden(watcher)
             watcher.suppress_vbe_reporting(False)
+
+    @staticmethod
+    def _await_vbe_hidden(watcher: DialogWatcher,
+                          limit_s: float = 5.0) -> None:
+        deadline = time.time() + limit_s
+        while time.time() < deadline:
+            if not watcher.vbe_window_visible():
+                return
+            time.sleep(0.02)
 
 
 def main() -> int:
@@ -378,6 +408,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="unknown")
     parser.add_argument("--artifacts", default="")
+    parser.add_argument("--app", default="excel")
     args = parser.parse_args()
     _session_id = args.session
 
@@ -401,7 +432,11 @@ def main() -> int:
         except (ValueError, RuntimeError):
             pass
 
-    worker = Worker(artifacts_dir=args.artifacts)
+    try:
+        worker = Worker(app=args.app, artifacts_dir=args.artifacts)
+    except ValueError as err:
+        print(f"PYVBA_WORKER_FATAL|{err}", file=sys.stderr, flush=True)
+        return 1
     try:
         worker.start()
     except Exception as err:  # noqa: BLE001 - fatal startup must be reported

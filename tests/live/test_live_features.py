@@ -416,9 +416,10 @@ End Function
 class TestExcelProvenance:
     def test_version_recorded_in_trace(self, session):
         created = [e for e in session.events
-                   if e.get("kind") == "excel-created"][-1]
-        assert created.get("excel_version")
-        assert created.get("excel_build")
+                   if e.get("kind") == "app-created"][-1]
+        assert created.get("app") == "excel"
+        assert created.get("app_version")
+        assert created.get("app_build")
 
 
 class TestPropertyBasedFuzzing:

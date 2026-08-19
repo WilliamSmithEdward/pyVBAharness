@@ -1,7 +1,7 @@
 """SessionPool: parallel VBA execution across multiple owned Excel
 instances.
 
-Each member is a full ExcelSession: its own worker process, its own new
+Each member is a full session: its own worker process, its own new
 EXCEL.EXE (PID-verified, kill-on-close job), its own dialog watcher and
 manifest. Members run with ``exclusive=False`` (the machine-wide session
 mutex exists to stop ACCIDENTAL concurrency; the pool is deliberate
@@ -31,36 +31,46 @@ import queue
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable
 
-from . import vbasig
+from . import apps, vbasig
 from .results import HarnessError, RunResult, TestCaseResult
-from .session import ExcelSession, HarnessConfig
+from .session import OfficeSession, session_for, HarnessConfig
 
 
 class SessionPool:
-    """N concurrently usable ExcelSessions behind one work queue.
+    """N concurrently usable sessions behind one work queue.
 
     ``submit(task)`` schedules ``task(session)`` on a checked-out member and
     returns a Future; ``run_vba`` is the common case; ``run_tests`` shards a
     test suite across all members and merges the results in discovery order.
+
+    ``app`` selects the host; every member runs the same one. PowerPoint
+    cannot be hidden, so a PowerPoint pool puts N windows on screen.
     """
 
     def __init__(self, size: int = 2,
-                 config: HarnessConfig | None = None) -> None:
+                 config: HarnessConfig | None = None,
+                 app: str = "excel") -> None:
         if size < 1:
             raise ValueError("SessionPool size must be at least 1")
+        detail = apps.info(app)
+        if size > 1 and not detail.multi_instance:
+            raise HarnessError(
+                f"SessionPool cannot run {size} {detail.label} sessions. "
+                + apps.single_instance_reason(app))
         base = config or HarnessConfig()
         member_config = dataclasses.replace(
             base, exclusive=False, auto_recycle=True)
         self.size = size
+        self.app = app
         self._closed = False
         self._executor = ThreadPoolExecutor(
             max_workers=size, thread_name_prefix="pyvba-pool")
-        self._idle: "queue.Queue[ExcelSession]" = queue.Queue()
-        self._sessions: list[ExcelSession] = []
+        self._idle: "queue.Queue[OfficeSession]" = queue.Queue()
+        self._sessions: list[OfficeSession] = []
 
-        # Start members concurrently: Excel launches are independent
+        # Start members concurrently: Office launches are independent
         # processes, and N sequential warm starts would cost N x 0.5-3 s.
-        startups = [self._executor.submit(ExcelSession, member_config)
+        startups = [self._executor.submit(session_for, app, member_config)
                     for _ in range(size)]
         failures: list[BaseException] = []
         for startup in startups:
@@ -83,18 +93,18 @@ class SessionPool:
 
     # ----- scheduling ------------------------------------------------------
 
-    def submit(self, task: Callable[[ExcelSession], Any]) -> Future:
+    def submit(self, task: Callable[[OfficeSession], Any]) -> Future:
         """Run ``task(session)`` on the next free member; returns a Future.
 
         The session is exclusively checked out to the task for its duration,
         so the task may call any session method, including multi-step flows
-        (open a workbook, inject, run, read ranges).
+        (open a document, inject, run, read ranges).
         """
         if self._closed:
             raise HarnessError("The pool is closed.")
         return self._executor.submit(self._run_checked_out, task)
 
-    def _run_checked_out(self, task: Callable[[ExcelSession], Any]) -> Any:
+    def _run_checked_out(self, task: Callable[[OfficeSession], Any]) -> Any:
         session = self._idle.get()
         try:
             return task(session)
@@ -156,8 +166,14 @@ class SessionPool:
     # ----- introspection ---------------------------------------------------
 
     @property
+    def app_pids(self) -> list[int]:
+        """PIDs of every member's owned application instance."""
+        return [session.app_pid for session in self._sessions]
+
+    @property
     def excel_pids(self) -> list[int]:
-        return [session.excel_pid for session in self._sessions]
+        """Deprecated alias for :attr:`app_pids`."""
+        return self.app_pids
 
     # ----- lifecycle -------------------------------------------------------
 

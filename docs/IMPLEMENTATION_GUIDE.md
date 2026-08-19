@@ -11,7 +11,8 @@ rules. This guide is the how-to.
 
 ## 1. Orientation in five minutes
 
-The harness runs VBA inside real desktop Excel and refuses to hang. It is a
+The harness runs VBA inside real desktop Excel, Word, PowerPoint and
+Access, and refuses to hang. It is a
 three-process system:
 
 ```text
@@ -34,7 +35,9 @@ then accuracy, then performance.**
 | --- | --- |
 | `session.py` | supervisor, watchdogs, abort path, public API |
 | `pool.py` | N sessions in parallel behind a work queue |
-| `worker/excel_host.py` | every COM call in the project |
+| `worker/hosts/base.py` | every COM call that is not app-specific |
+| `worker/hosts/{excel,word,powerpoint,access}.py` | one adapter per app |
+| `apps.py` | per-app capabilities, measured; no COM, no pywin32 |
 | `worker/watcher.py` | dialog scanning (ctypes only, never COM) |
 | `worker/__main__.py` | worker command loop, progress tail |
 | `codegen.py` | VBA source generation (support, dispatcher, batch) |
@@ -73,11 +76,15 @@ Get-Process EXCEL -ErrorAction SilentlyContinue
 Get-ChildItem "$env:LOCALAPPDATA\pyvbaharness\sessions"
 ```
 
-## 3. The Excel behavior catalog
+## 3. The Office behavior catalog
 
-Every entry below was measured on Excel 365 x64, cost real debugging time,
+Every entry below was measured on Office 365 x64, cost real debugging time,
 and has a live test guarding it. Treat this as ground truth. Do not "clean
 up" code that references these; the workaround is the feature.
+
+Sections 3.1 to 3.12 were measured against Excel and apply to every host
+unless they name a worksheet. Sections 3.13 to 3.18 are differences between
+hosts, measured 2026-08-18 by running the same operation on all four.
 
 ### 3.1 Dispatch attaches instead of creating
 
@@ -85,8 +92,11 @@ up" code that references these; the workaround is the feature.
 first and returns whatever Excel is already running. Since the harness
 kills its Excel on a hang, attaching puts a user's open workbooks in the
 blast radius. Use `CoCreateInstance`, and keep the PID-snapshot check in
-`ExcelHost.create` that refuses to proceed if the "new" instance already
-existed.
+`OfficeHost._prove_owned` that refuses to proceed unless the instance is
+provably new. It uses two signals: the main window handle where the app
+exposes one, and otherwise a process-list difference that must name
+exactly one new process. Creation is serialized machine-wide by the
+CREATE mutex so two sessions cannot each see the other in that diff.
 
 ### 3.2 Application.Run breaks in-VBA error trapping
 
@@ -197,15 +207,92 @@ records the PID (from `GetWindowThreadProcessId(app.Hwnd)`) plus its start
 time, and additionally places Excel in a kill-on-close job object so worker
 death of any kind takes Excel with it.
 
+### 3.13 Word cannot pass arguments into a ParamArray
+
+`Application.Run` in Word fails with `DISP_E_PARAMNOTFOUND` (0x80020007)
+whenever the target procedure declares `ParamArray`. Excel, PowerPoint and
+Access all accept it. Explicit `ByVal ... As Variant` parameters work on all
+four, so `codegen.call_module_source` generates one named parameter per
+argument (`pyVbaArg0`, `pyVbaArg1`, ...). The dispatcher is already
+regenerated whenever the arity changes, so this costs nothing. Do not
+"simplify" it back to a ParamArray: Word runs with arguments stop working
+and nothing else does.
+
+### 3.14 Access cannot call Application.Run through pywin32
+
+Every `app.Run(...)` on Access through `win32com.client.dynamic` raises
+`DISP_E_PARAMNOTOPTIONAL` (scode 0x8002000E), whatever the target. Padding
+the 30 optional parameters with `pythoncom.Missing` does not help, and it
+fails identically for a zero-argument target, so it is the dispatch wrapper
+rather than the callee. The same call through a raw `IDispatch::Invoke`
+returns normally. `AccessHost._invoke_run` therefore resolves the `Run`
+DISPID once and invokes it directly.
+
+`Application.Eval` also works and was considered as the fallback (it
+returned a 60000-character string intact), but it evaluates expressions, so
+it cannot call a `Sub` and would need arguments quoted into the expression
+text. The raw Invoke keeps one code path for all four hosts.
+
+### 3.15 Run reference formats differ per host
+
+There is no single string that works everywhere:
+
+| Host | Reference | Notes |
+| --- | --- | --- |
+| Excel | `'Book1.xlsm'!Module.Proc` | document qualification required |
+| Word | `Module.Proc` | document-qualified forms fail |
+| PowerPoint | `Module.Proc` | also accepts qualified forms |
+| Access | `Proc` | any qualified form fails: "cannot find the procedure" |
+
+Each host supplies its own `_run_ref`. The unqualified forms are safe
+because a session owns its instance and keeps one document open in it.
+
+### 3.16 PowerPoint is single-instance and cannot be hidden
+
+`Application.Visible = False` raises "Invalid request. Hiding the
+application window is not allowed", so PowerPoint runs on screen; the
+`app-created` event reports `can_hide: false` rather than claiming a hidden
+host. More seriously, a second `CoCreateInstance` returns the process that
+is already running: two activations produced one PID, where Excel, Word and
+Access each produced two. A PowerPoint session therefore cannot run
+alongside another, cannot be pooled, and cannot start while the user has
+PowerPoint open. `_prove_owned` refuses in that case, because taking
+ownership of a process the harness did not create would put someone else's
+presentation inside the blast radius of a timeout kill.
+
+### 3.17 An unsaved Access module raises a modal prompt at close
+
+A module added through the VBE is unsaved, and Access raises a modal
+"Save As / Module Name" dialog for each one when the database closes. That
+prompt blocked `Quit` outright during development and left Access wedged
+with no way in. `AccessHost.close_document` deletes the components the
+session injected before calling `CloseCurrentDatabase`, so the prompt never
+exists. Prevention is the pattern to reach for first here: the dialog has no
+Win32 buttons, so a watcher could report it but never dismiss it.
+
+The removal is scoped to `self._injected`, never the whole project, because
+an opened database's own modules belong to the caller.
+
+### 3.18 Access ordering: SetWarnings needs a database
+
+`DoCmd.SetWarnings False` fails with "The command or action 'SetWarnings'
+isn't available now" when no database is open, which is where it would
+naturally go in `_configure_app`. It is applied in `_open_finished` instead,
+once a database exists. Access also has no unsaved document at all, so
+`new_document` creates a scratch `.accdb` in a temp directory, and no
+"trust access to the VBA project object model" option, so it has no VBOM
+preflight.
+
 ## 4. Invariants
 
 These are the guarantees the harness sells. Changing one is a contract
 change: update the docs, the oracle, and the tests in the same patch.
 
-1. The harness creates its own Excel and never attaches to a running one.
+1. The harness creates its own instance and never attaches to a running
+   one, on any host.
 2. Every command carries a positive timeout. A breach kills the recorded
-   Excel, kills the worker, and marks the session dead.
-3. No command runs after the owned Excel is killed.
+   host process, kills the worker, and marks the session dead.
+3. No command runs after the owned host is killed.
 4. A timeout or blocked modal is infrastructure state, never evidence about
    the VBA under test. Only `passed` and `vba-error` describe the code.
 5. VBA errors are captured inside VBA by a directly-called dispatcher.
@@ -214,7 +301,47 @@ change: update the docs, the oracle, and the tests in the same patch.
 8. Compile checks serialize machine-wide (they drive the visible VBE).
 9. One session serves one caller at a time; `SessionPool` enforces this by
    checkout.
-10. Workbooks open read-only by default and close without saving.
+10. Documents open read-only by default and close without saving.
+11. A prompt that can be prevented is prevented, never dismissed after the
+    fact. See section 4.1.
+
+### 4.1 Prefer prevention, then a deterministic signal, then a deadline
+
+Wedge resistance is built in that order, and new work should follow it.
+
+Prevention comes first because Office's own prompts (NUIDialog and the
+`bosa_sdm_*` family) draw their controls inside a NetUI surface: there are
+no Win32 buttons to enumerate or click, so a watcher can see them and never
+answer them. Anything that stops the dialog existing beats anything that
+reacts to it. Current examples: alerts and link prompts off before a
+document exists, `FeatureInstall = msoFeatureInstallNone` so a missing
+component raises an error rather than the Windows Installer dialog,
+AutoRecover off, Word's `ConfirmConversions` off, PowerPoint's `Saved = True`
+before close, and Access's injected modules deleted before the database
+closes.
+
+A deterministic signal comes second, where one exists. Prefer a state the
+OS or the object model will tell you about exactly over a sampled guess:
+
+- `wait_for_exit` blocks on the process handle, which the kernel signals at
+  the instant the process ends, instead of polling `is_process_alive`.
+- The VBE disables its Compile control precisely when a project finishes
+  compiling, so a clean compile returns in milliseconds rather than waiting
+  out the dialog window.
+- The watcher suppresses its generic modal check while a dialog it clicked
+  is still a valid window, rather than for a fixed settle interval.
+
+A deadline is the backstop, not the mechanism. It exists because a COM call
+into a blocked apartment cannot be interrupted from inside, which is the one
+case no signal can fix. Two waits remain irreducibly time-based, and both
+are proving a negative: the compile watch window when neither a dialog nor
+the control-disabled signal appears, and the four-scan confirmation before
+reporting a modal that is only visible as a disabled main window.
+
+pywin32 exposes no `CoRegisterMessageFilter`, so COM-level "callee is busy"
+rejections cannot be retried from inside the worker. They are named in
+`_REJECTION_HRESULTS` so the message says the host was busy or showing a
+dialog rather than printing a bare HRESULT.
 
 `oracle.py` encodes most of these as a trace validator. Sessions validate
 their own trace on close and warn, and the unit suite replays synthetic
@@ -228,7 +355,8 @@ Worked example, mirroring how `reset_sheets` was added.
 **Step 1, name the command.** Add `CMD_RESET_SHEETS = "reset_sheets"` to
 `protocol.py`. Add an event kind too if the feature reports asynchronously.
 
-**Step 2, implement the COM work** in `worker/excel_host.py`, decorated so
+**Step 2, implement the COM work** in `worker/hosts/base.py` if every app
+can do it, or in the one adapter that can, decorated so
 COM failures become diagnosable `HostError`s:
 
 ```python
@@ -360,7 +488,7 @@ Current measured costs (Excel 365 x64, Python 3.14,
 
 Where the speed comes from, so you do not accidentally remove it:
 
-- **Signature cache** (`ExcelHost._resolved`): resolving a target used to
+- **Signature cache** (`OfficeHost._resolved`): resolving a target used to
   read module source through VBE COM on every run. Caching it took warm runs
   from 15 ms to 0.6 ms. Invalidated by `_write_module`.
 - **Injection cache** (`ExcelSession._injected`): identical source is never

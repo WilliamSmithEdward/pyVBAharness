@@ -1,4 +1,4 @@
-"""ExcelSession: the supervisor.
+"""The supervisor: one class per Office application.
 
 Runs no COM itself. It spawns the worker process, feeds it commands, consumes
 its event stream, and enforces the three watchdog windows from outside the
@@ -9,10 +9,15 @@ COM apartment (XLIDE session pattern):
 - cleanup: shutdown grace, because Close/Quit/COM-release can hang after the
   useful work finished
 
-All failures funnel through one abort path: kill the recorded Excel PID,
-kill the worker, record excel-killed, mark the session dead. A dead session
+All failures funnel through one abort path: kill the recorded host PID,
+kill the worker, record app-killed, mark the session dead. A dead session
 issues no further commands (oracle rule). A timeout or blocked modal is
 reported as infrastructure state, never as evidence about the VBA code.
+
+``OfficeSession`` holds everything the four hosts share. ``ExcelSession``,
+``WordSession``, ``PowerPointSession`` and ``AccessSession`` add what is
+genuinely app-specific: Excel alone has worksheet ranges and batch
+execution, and Access alone has no unsaved document.
 """
 from __future__ import annotations
 
@@ -35,13 +40,14 @@ from typing import Any
 from . import codegen, protocol, vbasig
 from .codegen import is_document_module
 from .numbering import instrument_error_lines, instrument_module
-from .lock import COMPILE_MUTEX_NAME, SessionLock
-from .screenshot import capture_excel_window
+from .lock import COMPILE_MUTEX_NAME, SessionLock, session_mutex_name
+from .screenshot import capture_app_window
 from .oracle import OracleIssue, validate_session_trace
 from .process_control import (
     OwnedProcessManifest,
     is_process_alive,
     sweep_stale_manifests,
+    wait_for_exit,
 )
 from .results import (
     COMPILE_ACCEPTED,
@@ -114,8 +120,13 @@ def _sweep_old_artifacts(directory: Path) -> None:
         pass
 
 
-class ExcelSession:
-    """One owned, watchdogged Excel instance reusable across many runs."""
+class OfficeSession:
+    """One owned, watchdogged Office instance reusable across many runs."""
+
+    #: App key understood by the worker (see worker/hosts/__init__.py).
+    app = "excel"
+    #: What this host calls the container modules live in.
+    document_noun = "document"
 
     def __init__(self, config: HarnessConfig | None = None) -> None:
         self.config = config or HarnessConfig()
@@ -139,7 +150,9 @@ class ExcelSession:
         self._artifact_dir = self._artifact_root / self.session_id
         _sweep_old_artifacts(self._artifact_root)
         if self.config.exclusive:
-            self._lock = SessionLock(timeout_s=self.config.lock_wait_s)
+            self._lock = SessionLock(
+                timeout_s=self.config.lock_wait_s,
+                name=session_mutex_name(self.app))
             self._lock.acquire()
         try:
             for note in sweep_stale_manifests(self.config.manifest_dir):
@@ -170,6 +183,7 @@ class ExcelSession:
         argv = (list(self.config.worker_argv) if self.config.worker_argv
                 else [self.config.python_executable, "-m",
                       "pyvbaharness.worker"])
+        argv = argv + ["--app", self.app]
         try:
             self._artifact_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -289,7 +303,7 @@ class ExcelSession:
                         self._abort("cleanup-failed")
                 self._dead = True
         finally:
-            self._ensure_owned_excel_gone()
+            self._ensure_owned_app_gone()
             # Join the pipe readers so a session's file objects are not
             # garbage collected while a thread still reads them (noisy
             # OSError at interpreter teardown otherwise).
@@ -310,11 +324,11 @@ class ExcelSession:
                     f"pyvbaharness trace oracle: {issue.code}: "
                     f"{issue.message}", stacklevel=2)
 
-    def _ensure_owned_excel_gone(self) -> None:
-        """Verify the owned Excel process actually ended; kill it if not.
+    def _ensure_owned_app_gone(self) -> None:
+        """Verify the owned host process actually ended; kill it if not.
 
-        A successful Quit() is not proof of termination. Excel that has been
-        made visible at any point (a compile check does exactly that) treats
+        A successful Quit() is not proof of termination. An application made
+        visible at any point (a compile check does exactly that) treats
         itself as user-launched and keeps running after its last automation
         client disconnects, leaving a hidden orphan. Observed on 2026-07-25:
         a live run ended with every harness process gone and one responding
@@ -322,7 +336,7 @@ class ExcelSession:
         """
         if self._manifest is None:
             return
-        entry = self._manifest.entry("excel")
+        entry = self._manifest.entry("app")
         if entry is None:
             return
         pid, _creation = entry
@@ -331,34 +345,34 @@ class ExcelSession:
             # it so the trace shows the instance was accounted for; without
             # this the oracle reports a missing-cleanup violation for a
             # session that did nothing wrong.
-            self._note_excel_gone("already-exited")
+            self._note_app_gone("already-exited")
             return
-        deadline = time.monotonic() + self.config.cleanup_grace_s
-        while time.monotonic() < deadline:
-            if not is_process_alive(pid):
-                self._note_excel_gone("exited-during-cleanup")
-                return
-            time.sleep(0.2)
-        if self._manifest.kill_role("excel"):
+        # Wait on the process handle rather than polling: it signals the
+        # moment the process exits, so a clean shutdown costs the time the
+        # host actually takes and never a rounding-up to a poll interval.
+        if wait_for_exit(pid, self.config.cleanup_grace_s):
+            self._note_app_gone("exited-during-cleanup")
+            return
+        if self._manifest.kill_role("app"):
             self.events.append({
-                "kind": protocol.EV_EXCEL_KILLED,
+                "kind": protocol.EV_APP_KILLED,
                 "session": self.session_id,
                 "reason": "quit-did-not-terminate",
                 "killed": True,
                 "at": time.time(),
             })
 
-    def _note_excel_gone(self, reason: str) -> None:
-        """Record that the owned Excel is no longer running, if the trace
-        does not already say so."""
+    def _note_app_gone(self, reason: str) -> None:
+        """Record that the owned host is no longer running, if the trace does
+        not already say so."""
         for event in reversed(self.events):
             kind = event.get("kind")
-            if kind in (protocol.EV_EXCEL_KILLED, protocol.EV_EXCEL_QUIT):
+            if kind in (protocol.EV_APP_KILLED, protocol.EV_APP_QUIT):
                 return
-            if kind == protocol.EV_EXCEL_CREATED:
+            if kind == protocol.EV_APP_CREATED:
                 break
         self.events.append({
-            "kind": protocol.EV_EXCEL_KILLED,
+            "kind": protocol.EV_APP_KILLED,
             "session": self.session_id,
             "reason": reason,
             "killed": False,
@@ -377,9 +391,9 @@ class ExcelSession:
                 self._ingest(payload)
 
     def recycle(self) -> None:
-        """Kill whatever remains and start a fresh worker + Excel.
+        """Kill whatever remains and start a fresh worker + application.
 
-        State (open workbook, injected modules) is NOT replayed; callers
+        State (open document, injected modules) is NOT replayed; callers
         reopen and reinject. Recycling exists so one hang cannot poison
         subsequent runs.
         """
@@ -387,7 +401,7 @@ class ExcelSession:
             self._abort("recycled")
         self._start()
 
-    def __enter__(self) -> "ExcelSession":
+    def __enter__(self) -> "OfficeSession":
         return self
 
     def __exit__(self, *_exc: Any) -> None:
@@ -396,18 +410,18 @@ class ExcelSession:
     # ----- abort path ------------------------------------------------------
 
     def _abort(self, reason: str) -> None:
-        """Single failure path: kill owned Excel, kill worker, mark dead."""
+        """Single failure path: kill owned host, kill worker, mark dead."""
         if self._dead:
             return
         self._dead = True
         killed = False
         if self._manifest is not None:
-            killed = self._manifest.kill_role("excel")
+            killed = self._manifest.kill_role("app")
         proc = self._proc
         if proc is not None and proc.poll() is None:
             proc.kill()
         self.events.append({
-            "kind": protocol.EV_EXCEL_KILLED,
+            "kind": protocol.EV_APP_KILLED,
             "session": self.session_id,
             "reason": reason,
             "killed": killed,
@@ -439,11 +453,11 @@ class ExcelSession:
 
     def _ingest(self, event: dict[str, Any]) -> None:
         self.events.append(event)
-        if (event.get("kind") == protocol.EV_EXCEL_CREATED
+        if (event.get("kind") == protocol.EV_APP_CREATED
                 and self._manifest is not None):
             pid = int(event.get("pid") or 0)
             if pid > 0:
-                self._manifest.record("excel", pid)
+                self._manifest.record("app", pid)
 
     def _next_item(self, deadline: float) -> tuple[str, Any] | None:
         remaining = deadline - time.monotonic()
@@ -588,12 +602,12 @@ class ExcelSession:
     def _capture_timeout_screenshot(self, command: str) -> str | None:
         if not self.config.screenshot_on_timeout:
             return None
-        pid = self.excel_pid
+        pid = self.app_pid
         if pid <= 0:
             return None
         try:
-            return capture_excel_window(pid, self._artifact_dir,
-                                        f"timeout-{command}")
+            return capture_app_window(pid, self._artifact_dir,
+                                      f"timeout-{command}", app=self.app)
         except Exception:  # noqa: BLE001 - capture must never block the kill
             return None
 
@@ -607,7 +621,7 @@ class ExcelSession:
                 texts=[str(t) for t in raw.get("texts", []) or []],
                 buttons=[str(b) for b in raw.get("buttons", []) or []],
                 button_ids=[int(i) for i in raw.get("button_ids", []) or []],
-                classification=str(raw.get("classification", "excel-modal")),
+                classification=str(raw.get("classification", "app-modal")),
                 action=str(raw.get("action", "none")),
                 screenshot=str(raw.get("screenshot", "")),
             ))
@@ -645,28 +659,22 @@ class ExcelSession:
         return self._expect_passed(
             self._command(protocol.CMD_PING, {}, 10.0))
 
-    def new_workbook(self) -> dict[str, Any]:
+    def new_document(self) -> dict[str, Any]:
+        """Create an empty document for modules to live in."""
         self._injected.clear()
         self._coverage.clear()
         return self._expect_passed(
-            self._command(protocol.CMD_NEW_WORKBOOK, {}, None))
+            self._command(protocol.CMD_NEW_DOCUMENT, {}, None))
 
-    def open_workbook(self, path: str | Path,
+    def open_document(self, path: str | Path,
                       read_only: bool = True,
                       timeout: float | None = None) -> dict[str, Any]:
         resolved = str(Path(path).resolve())
         self._injected.clear()
         self._coverage.clear()
         return self._expect_passed(self._command(
-            protocol.CMD_OPEN_WORKBOOK,
+            protocol.CMD_OPEN_DOCUMENT,
             {"path": resolved, "read_only": read_only}, timeout))
-
-    def reset_sheets(self) -> dict[str, Any]:
-        """Clear every worksheet while keeping injected modules: a cheap
-        between-tests reset (a few ms against ~140 ms for new_workbook plus
-        reinjection)."""
-        return self._expect_passed(
-            self._command(protocol.CMD_RESET_SHEETS, {}, None))
 
     def export_modules(self, directory: str | Path) -> list[str]:
         """Export every non-harness VBA component to .bas/.cls/.frm files
@@ -683,8 +691,8 @@ class ExcelSession:
 
         Headers from exported files are stripped automatically; module names
         come from file stems. Document modules (ThisWorkbook, Sheet1) and
-        forms are skipped: Excel owns those components and refuses to have
-        them recreated, so importing an export directory round-trips
+        forms are skipped: the host owns those components and refuses to
+        have them recreated, so importing an export directory round-trips
         cleanly.
         """
         imported: list[str] = []
@@ -710,7 +718,7 @@ class ExcelSession:
         (implies line numbering) additionally inserts line-coverage hooks;
         collect results with ``coverage_report()``. Injection is skipped when
         this session already injected identical source into the current
-        workbook, which makes repeat run_vba calls cost a warm run instead
+        document, which makes repeat run_vba calls cost a warm run instead
         of a module replacement.
         """
         codegen.validate_module_name(name)
@@ -758,7 +766,7 @@ class ExcelSession:
         """Line coverage for every module injected with coverage=True.
 
         Hits accumulate across runs since the last instrumented-module
-        change; recycling or replacing the workbook clears everything.
+        change; recycling or replacing the document clears everything.
         """
         if not self._coverage:
             return CoverageReport(modules={})
@@ -809,59 +817,6 @@ class ExcelSession:
             screenshot=str(payload.get("screenshot", "")),
         )
 
-    def run_batch(self, calls: list[tuple[str, tuple]],
-                  timeout: float | None = None,
-                  idle_timeout: float | None = None) -> list[RunResult]:
-        """Run many calls in ONE COM round trip.
-
-        ``calls`` is a list of (target, args) pairs; args must be scalars
-        (str, int, float, bool, None). Results come back in call order, each
-        with the same fidelity as run_macro (value, output, error with line
-        and stack, per-call VBA-measured duration). The fixed ~15-20 ms
-        per-COM-call overhead is paid once for the whole batch instead of
-        once per call.
-
-        The whole batch shares one watchdog window; the default scales with
-        batch size. An infrastructure failure (timeout, blocked modal)
-        raises SessionDead, because per-call attribution is unknowable once
-        the batch is interrupted.
-        """
-        if not calls:
-            return []
-        if len(calls) > codegen.MAX_BATCH_CALLS:
-            raise ValueError(
-                f"run_batch supports at most {codegen.MAX_BATCH_CALLS} "
-                f"calls, got {len(calls)}.")
-        encoded = []
-        for target, args in calls:
-            codegen.validate_run_target(target)
-            if len(args) > codegen.MAX_RUN_ARGS:
-                raise ValueError(
-                    f"Batch call for {target} has {len(args)} arguments; "
-                    f"the limit is {codegen.MAX_RUN_ARGS}.")
-            encoded.append({
-                "target": target,
-                "args": [codegen.encode_batch_arg(a) for a in args],
-            })
-        if timeout is None:
-            timeout = self.config.default_timeout_s + 0.05 * len(calls)
-        data = self._expect_passed(self._command(
-            protocol.CMD_RUN_BATCH, {"calls": encoded}, timeout,
-            idle_timeout_s=idle_timeout))
-        results: list[RunResult] = []
-        for item in data.get("results", []):
-            outcome = str(item.get("outcome", RUNNER_ERROR))
-            error = (self._parse_error(item) if outcome == VBA_ERROR
-                     else None)
-            results.append(RunResult(
-                outcome=outcome,
-                duration_s=float(item.get("ms", 0) or 0) / 1000.0,
-                value=item.get("value"),
-                output=[str(x) for x in item.get("output", []) or []],
-                error=error,
-            ))
-        return results
-
     def run_vba(self, source: str, proc: str = "Main", args: tuple = (),
                 timeout: float | None = None,
                 idle_timeout: float | None = None,
@@ -870,16 +825,15 @@ class ExcelSession:
                 line_numbers: bool = True,
                 coverage: bool = False) -> RunResult:
         """Inject ``source`` as a module (replacing any prior one) and run
-        ``proc`` from it. If no workbook is open, an unsaved in-memory
-        workbook is created.
+        ``proc`` from it. If no document is open, one is created.
 
         Line numbering is on by default so ``result.error.line`` and
         ``result.error.stack`` report the failing source lines; identical
         source is not reinjected, so calling this in a loop costs a warm
         run, not a module replacement.
         """
-        if not self._workbook_known():
-            self.new_workbook()
+        if not self._document_known():
+            self.new_document()
         self.add_module(module_name, source, line_numbers=line_numbers,
                         coverage=coverage)
         return self.run_macro(f"{module_name}.{proc}", *args,
@@ -980,8 +934,8 @@ class ExcelSession:
         return results
 
     def _install_test_source(self, module: str, source: str) -> None:
-        if not self._workbook_known():
-            self.new_workbook()
+        if not self._document_known():
+            self.new_document()
         self.add_module(module, source, line_numbers=True)
 
     def save_trace(self, path: str | Path) -> Path:
@@ -994,14 +948,14 @@ class ExcelSession:
                                         default=str) + "\n")
         return target
 
-    def _workbook_known(self) -> bool:
+    def _document_known(self) -> bool:
         for event in reversed(self.events):
             kind = event.get("kind")
-            if kind in (protocol.EV_WORKBOOK_CREATED,
-                        protocol.EV_WORKBOOK_OPENED):
+            if kind in (protocol.EV_DOCUMENT_CREATED,
+                        protocol.EV_DOCUMENT_OPENED):
                 return True
-            if kind in (protocol.EV_WORKBOOK_CLOSED, protocol.EV_EXCEL_KILLED,
-                        protocol.EV_EXCEL_CREATED):
+            if kind in (protocol.EV_DOCUMENT_CLOSED, protocol.EV_APP_KILLED,
+                        protocol.EV_APP_CREATED):
                 return False
         return False
 
@@ -1024,31 +978,17 @@ class ExcelSession:
         return self._dead
 
     @property
-    def has_workbook(self) -> bool:
-        """True when the current worker generation holds an open workbook."""
-        return self._workbook_known()
+    def has_document(self) -> bool:
+        """True when the current worker generation holds an open document."""
+        return self._document_known()
 
     @property
-    def excel_pid(self) -> int:
-        """PID of the owned Excel instance (0 before excel-created)."""
+    def app_pid(self) -> int:
+        """PID of the owned application instance (0 before app-created)."""
         for event in reversed(self.events):
-            if event.get("kind") == protocol.EV_EXCEL_CREATED:
+            if event.get("kind") == protocol.EV_APP_CREATED:
                 return int(event.get("pid") or 0)
         return 0
-
-    def read_range(self, sheet: str, ref: str,
-                   timeout: float | None = None) -> list[list[Any]]:
-        data = self._expect_passed(self._command(
-            protocol.CMD_READ_RANGE, {"sheet": sheet, "ref": ref}, timeout))
-        return data.get("data", [])
-
-    def write_range(self, sheet: str, start_cell: str,
-                    data: list[list[Any]],
-                    timeout: float | None = None) -> dict[str, Any]:
-        return self._expect_passed(self._command(
-            protocol.CMD_WRITE_RANGE,
-            {"sheet": sheet, "start_cell": start_cell, "data": data},
-            timeout))
 
     def save_as(self, path: str | Path,
                 timeout: float | None = None) -> dict[str, Any]:
@@ -1059,7 +999,7 @@ class ExcelSession:
     def compile_project(self, watch_seconds: float | None = None,
                         include_harness_support: bool = False
                         ) -> CompileResult:
-        """VBE compile check. Excel becomes visible for its duration.
+        """VBE compile check. The host becomes visible for its duration.
 
         A clean compile usually returns fast: the VBE disables its Compile
         command once the project is compiled, which is a positive completion
@@ -1069,8 +1009,8 @@ class ExcelSession:
 
         ``include_harness_support=True`` injects the harness support module
         first, so code that calls PyVbaLog or the assert helpers compiles the
-        way it will actually run. Leave it False to check a workbook exactly
-        as-is.
+        way it will actually run. Leave it False to check a document
+        exactly as-is.
 
         Compile checks are serialized machine-wide (dedicated mutex), even
         for pool sessions: they drive the visible VBE, which is a genuinely
@@ -1111,12 +1051,191 @@ class ExcelSession:
                "unknown (timeout is never evidence).")
 
 
+class ExcelSession(OfficeSession):
+    """Excel host: workbooks, worksheet ranges, and batch execution.
+
+    The only host with a grid, so ``read_range`` / ``write_range`` and the
+    batch dispatcher (which stages its arguments on a hidden worksheet) live
+    here rather than on the base.
+    """
+
+    app = "excel"
+    document_noun = "workbook"
+
+    # ----- workbook aliases -------------------------------------------------
+
+    def new_workbook(self) -> dict[str, Any]:
+        """Create an unsaved in-memory workbook."""
+        return self.new_document()
+
+    def open_workbook(self, path: str | Path, read_only: bool = True,
+                      timeout: float | None = None) -> dict[str, Any]:
+        return self.open_document(path, read_only=read_only, timeout=timeout)
+
+    @property
+    def has_workbook(self) -> bool:
+        """True when the current worker generation holds an open workbook."""
+        return self.has_document
+
+    @property
+    def excel_pid(self) -> int:
+        """PID of the owned Excel instance (0 before app-created)."""
+        return self.app_pid
+
+    # ----- worksheets -------------------------------------------------------
+
+    def reset_sheets(self) -> dict[str, Any]:
+        """Clear every worksheet while keeping injected modules: a cheap
+        between-tests reset (a few ms against ~140 ms for new_workbook plus
+        reinjection)."""
+        return self._expect_passed(
+            self._command(protocol.CMD_RESET_SHEETS, {}, None))
+
+    def read_range(self, sheet: str, ref: str,
+                   timeout: float | None = None) -> list[list[Any]]:
+        data = self._expect_passed(self._command(
+            protocol.CMD_READ_RANGE, {"sheet": sheet, "ref": ref}, timeout))
+        return data.get("data", [])
+
+    def write_range(self, sheet: str, start_cell: str,
+                    data: list[list[Any]],
+                    timeout: float | None = None) -> dict[str, Any]:
+        return self._expect_passed(self._command(
+            protocol.CMD_WRITE_RANGE,
+            {"sheet": sheet, "start_cell": start_cell, "data": data},
+            timeout))
+
+    # ----- batch ------------------------------------------------------------
+
+    def run_batch(self, calls: list[tuple[str, tuple]],
+                  timeout: float | None = None,
+                  idle_timeout: float | None = None) -> list[RunResult]:
+        """Run many calls in ONE COM round trip.
+
+        ``calls`` is a list of (target, args) pairs; args must be scalars
+        (str, int, float, bool, None). Results come back in call order, each
+        with the same fidelity as run_macro (value, output, error with line
+        and stack, per-call VBA-measured duration). The fixed ~15-20 ms
+        per-COM-call overhead is paid once for the whole batch instead of
+        once per call.
+
+        The whole batch shares one watchdog window; the default scales with
+        batch size. An infrastructure failure (timeout, blocked modal)
+        raises SessionDead, because per-call attribution is unknowable once
+        the batch is interrupted.
+        """
+        if not calls:
+            return []
+        if len(calls) > codegen.MAX_BATCH_CALLS:
+            raise ValueError(
+                f"run_batch supports at most {codegen.MAX_BATCH_CALLS} "
+                f"calls, got {len(calls)}.")
+        encoded = []
+        for target, args in calls:
+            codegen.validate_run_target(target)
+            if len(args) > codegen.MAX_RUN_ARGS:
+                raise ValueError(
+                    f"Batch call for {target} has {len(args)} arguments; "
+                    f"the limit is {codegen.MAX_RUN_ARGS}.")
+            encoded.append({
+                "target": target,
+                "args": [codegen.encode_batch_arg(a) for a in args],
+            })
+        if timeout is None:
+            timeout = self.config.default_timeout_s + 0.05 * len(calls)
+        data = self._expect_passed(self._command(
+            protocol.CMD_RUN_BATCH, {"calls": encoded}, timeout,
+            idle_timeout_s=idle_timeout))
+        results: list[RunResult] = []
+        for item in data.get("results", []):
+            outcome = str(item.get("outcome", RUNNER_ERROR))
+            error = (self._parse_error(item) if outcome == VBA_ERROR
+                     else None)
+            results.append(RunResult(
+                outcome=outcome,
+                duration_s=float(item.get("ms", 0) or 0) / 1000.0,
+                value=item.get("value"),
+                output=[str(x) for x in item.get("output", []) or []],
+                error=error,
+            ))
+        return results
+
+class WordSession(OfficeSession):
+    """Word host.
+
+    Word takes ``Module.Proc`` run references and rejects document-qualified
+    ones, which the worker handles; from here it behaves like any other host.
+    """
+
+    app = "word"
+    document_noun = "document"
+
+
+class PowerPointSession(OfficeSession):
+    """PowerPoint host.
+
+    PowerPoint cannot be hidden: ``Application.Visible = False`` raises
+    "Hiding the application window is not allowed", so runs happen on a
+    visible desktop. Ownership and teardown are unchanged, and the instance
+    still dies with the session.
+    """
+
+    app = "powerpoint"
+    document_noun = "presentation"
+
+
+class AccessSession(OfficeSession):
+    """Access host.
+
+    Two differences worth knowing before use. There is no unsaved database,
+    so ``new_document`` writes a scratch .accdb into a temp directory and
+    deletes it at teardown. And injecting VBA into an existing database
+    modifies that file immediately rather than at save time, so
+    ``open_document`` refuses ``read_only=True`` instead of quietly writing
+    to a database the caller asked not to change.
+    """
+
+    app = "access"
+    document_noun = "database"
+
+    def open_document(self, path: str | Path, read_only: bool = True,
+                      timeout: float | None = None) -> dict[str, Any]:
+        return super().open_document(path, read_only=read_only,
+                                     timeout=timeout)
+
+    def save_as(self, path: str | Path,
+                timeout: float | None = None) -> dict[str, Any]:
+        raise HarnessError(
+            "Access writes to the database file continuously, so save_as has "
+            "no meaning; copy the .accdb if you need a snapshot.")
+
+
+SESSIONS: dict[str, type[OfficeSession]] = {
+    ExcelSession.app: ExcelSession,
+    WordSession.app: WordSession,
+    PowerPointSession.app: PowerPointSession,
+    AccessSession.app: AccessSession,
+}
+
+
+def session_for(app: str, config: HarnessConfig | None = None
+                ) -> OfficeSession:
+    """Build the session class for an app key."""
+    try:
+        cls = SESSIONS[app]
+    except KeyError:
+        raise ValueError(
+            f"Unknown app {app!r}; expected one of "
+            f"{', '.join(sorted(SESSIONS))}.") from None
+    return cls(config)
+
+
 def _emergency_cleanup(manifest: OwnedProcessManifest) -> None:
     """Finalizer body: kill recorded processes when a session was never
     closed (garbage collection or interpreter exit). Must not reference the
     session object."""
     try:
-        manifest.kill_role("excel")
+        manifest.kill_role("app")
         manifest.kill_role("worker")
         manifest.remove()
     except Exception:
