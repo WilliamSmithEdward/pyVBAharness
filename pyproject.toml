@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyvbaharness"
-version = "1.1.1"
+version = "1.1.2"
 description = "Hang-resistant Python harness for running and validating VBA in desktop Excel, Word, PowerPoint and Access"
 readme = "README.md"
 requires-python = ">=3.10"

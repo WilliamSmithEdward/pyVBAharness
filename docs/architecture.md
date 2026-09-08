@@ -432,7 +432,7 @@ src/pyvbaharness/
   worker/__main__.py  worker entry point, command loop, progress tail
   worker/hosts/       one COM adapter per app, over a shared base
   worker/watcher.py   ctypes window scanner + dismissal executor
-tests/unit            pure logic, no Office required (176 tests)
+tests/unit            pure logic, no Office required (208 tests)
 tests/live            real Office, opt-in via -m live (120 tests)
 benchmarks/           per-run, batch, and pool scaling measurements
 ```

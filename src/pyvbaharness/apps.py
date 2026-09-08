@@ -37,6 +37,11 @@ class AppInfo:
     needs_vbom: bool = True
     #: File extensions save_as accepts (macro-enabled formats only).
     save_formats: tuple[str, ...] = ()
+    #: Every extension this app owns, including the ones it can open but not
+    #: save VBA into. Used to tell a document apart from VBA source, which
+    #: has no extension of its own worth listing: anything unrecognised is
+    #: treated as source.
+    document_extensions: tuple[str, ...] = ()
     #: Worksheet grid: read_range / write_range / run_batch.
     has_grid: bool = False
 
@@ -46,11 +51,15 @@ APPS: dict[str, AppInfo] = {
         key="excel", label="Excel", progid="Excel.Application",
         image_name="EXCEL.EXE", document_noun="workbook",
         security_key="Excel", save_formats=(".xlsm", ".xlsb"),
+        document_extensions=(".xlsm", ".xlsb", ".xlsx", ".xls", ".xlam",
+                             ".xltm", ".xltx", ".xlt"),
         has_grid=True),
     "word": AppInfo(
         key="word", label="Word", progid="Word.Application",
         image_name="WINWORD.EXE", document_noun="document",
-        security_key="Word", save_formats=(".docm", ".dotm")),
+        security_key="Word", save_formats=(".docm", ".dotm"),
+        document_extensions=(".docm", ".dotm", ".docx", ".doc", ".dotx",
+                             ".dot")),
     "powerpoint": AppInfo(
         key="powerpoint", label="PowerPoint",
         progid="PowerPoint.Application", image_name="POWERPNT.EXE",
@@ -60,7 +69,9 @@ APPS: dict[str, AppInfo] = {
         # Measured: "Invalid request. Hiding the application window is not
         # allowed."
         can_hide=False,
-        save_formats=(".pptm", ".potm")),
+        save_formats=(".pptm", ".potm"),
+        document_extensions=(".pptm", ".potm", ".pptx", ".ppt", ".potx",
+                             ".pot", ".ppsm", ".ppsx")),
     "access": AppInfo(
         key="access", label="Access", progid="Access.Application",
         image_name="MSACCESS.EXE", document_noun="database",
@@ -69,7 +80,8 @@ APPS: dict[str, AppInfo] = {
         security_key="", needs_vbom=False,
         # Access writes the database continuously; there is nothing to
         # save_as.
-        save_formats=()),
+        save_formats=(),
+        document_extensions=(".accdb", ".accde", ".mdb", ".mde", ".accdr")),
 }
 
 APP_KEYS = tuple(APPS)
@@ -82,6 +94,19 @@ def info(app: str) -> AppInfo:
         raise ValueError(
             f"Unknown app {app!r}; expected one of {', '.join(APP_KEYS)}."
         ) from None
+
+
+def app_for_document(suffix: str) -> str | None:
+    """The app owning a file extension, or None when it is not a document.
+
+    VBA source has no reserved extension of its own, so anything unlisted is
+    treated as source rather than guessed at.
+    """
+    wanted = suffix.lower()
+    for detail in APPS.values():
+        if wanted in detail.document_extensions:
+            return detail.key
+    return None
 
 
 def single_instance_reason(app: str) -> str:

@@ -5,9 +5,15 @@ Commands:
                     Reports every installed host: Excel, Word, PowerPoint,
                     Access. A host you do not have is a warning, not a
                     failure.
-  run FILE          run a procedure from a .bas/.vba source file
+  run FILE          run a procedure from a .bas/.vba source file, or from an
+                    Excel workbook opened read-only
   check FILE...     compile-check source files in a fresh workbook
-  check --workbook  compile-check an existing workbook's VBA project
+  check WORKBOOK    compile-check an existing workbook's VBA project
+  check --workbook  the same, named explicitly
+
+A positional path routes on its extension: an Excel extension is opened as a
+workbook, anything else is read as VBA source. A Word, PowerPoint, or Access
+document is refused, because the command line drives Excel only.
 
 Exit codes: 0 success/accepted, 1 VBA failure/rejected, 2 harness or
 environment failure. A timeout is infrastructure (2), never a verdict on the
@@ -165,6 +171,66 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 2 if hard_fail else 0
 
 
+# ----- input routing --------------------------------------------------------
+
+class _CliError(Exception):
+    """A bad invocation. Reported as one line, never as a traceback."""
+
+
+def _read_source(path: Path) -> str:
+    """Read a VBA source file as text.
+
+    VBIDE Export writes .bas and .cls in the ANSI code page rather than
+    UTF-8, so a module holding an accented identifier or string fails a
+    strict UTF-8 read. Editors write UTF-8, so that is tried first.
+    """
+    for encoding in ("utf-8-sig", "mbcs"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+        except OSError as err:
+            raise _CliError(f"{path}: {err.strerror or err}") from err
+    raise _CliError(
+        f"{path.name} is not readable as VBA source: it decodes as neither "
+        "UTF-8 nor the ANSI code page. If it is a document rather than a "
+        "module, pass it on its own so it can be opened as one.")
+
+
+def _resolve_inputs(names: list[str]) -> tuple[list[Path], Path | None]:
+    """Split command-line paths into VBA sources and one Excel document.
+
+    Routing is by extension, because a workbook read as source fails deep in
+    a decoder with an unhelpful message about byte 0xf6. Anything that is not
+    a known Office extension is treated as source.
+    """
+    sources: list[Path] = []
+    documents: list[Path] = []
+    for name in names:
+        path = Path(name)
+        if not path.exists():
+            raise _CliError(f"{name}: no such file")
+        owner = apps.app_for_document(path.suffix)
+        if owner is None:
+            sources.append(path)
+        elif owner == "excel":
+            documents.append(path)
+        else:
+            label = apps.info(owner).label
+            raise _CliError(
+                f"{path.name} is a {label} document, and the command line "
+                f"drives Excel only. Use {label}Session from Python to run "
+                "VBA in that host.")
+    if len(documents) > 1:
+        listed = ", ".join(p.name for p in documents)
+        raise _CliError(f"one workbook at a time, got: {listed}")
+    if documents and sources:
+        raise _CliError(
+            "compile a workbook as it stands, or loose source files in a "
+            "fresh workbook, but not both in one run.")
+    return sources, documents[0] if documents else None
+
+
 # ----- run ------------------------------------------------------------------
 
 def _parse_cli_arg(text: str):
@@ -181,11 +247,22 @@ def _parse_cli_arg(text: str):
 def cmd_run(args: argparse.Namespace) -> int:
     from . import ExcelSession
 
-    source = Path(args.file).read_text(encoding="utf-8-sig")
+    sources, workbook = _resolve_inputs([args.file])
+    # Everything that can fail on the arguments alone fails here, before
+    # paying for an Excel start.
+    source = _read_source(sources[0]) if sources else ""
     call_args = tuple(_parse_cli_arg(a) for a in args.arg)
+
     with ExcelSession() as session:
-        result = session.run_vba(source, proc=args.proc, args=call_args,
-                                 timeout=args.timeout)
+        if workbook is not None:
+            # Read-only: running a macro should not rewrite the caller's
+            # workbook as a side effect of asking for its result.
+            session.open_workbook(workbook, read_only=True)
+            result = session.run_macro(args.proc, *call_args,
+                                       timeout=args.timeout)
+        else:
+            result = session.run_vba(source, proc=args.proc, args=call_args,
+                                     timeout=args.timeout)
     for line in result.output:
         _print(line)
     if result.outcome == "passed":
@@ -205,27 +282,41 @@ def cmd_check(args: argparse.Namespace) -> int:
     from . import ExcelSession
     from .codegen import is_vba_identifier
 
-    if not args.files and not args.workbook:
-        _print("check needs source files or --workbook")
-        return 2
+    sources, workbook = _resolve_inputs(args.files)
+    if args.workbook:
+        if workbook is not None:
+            raise _CliError(
+                f"one workbook at a time: {workbook.name} was given "
+                f"positionally and {Path(args.workbook).name} as --workbook.")
+        if sources:
+            raise _CliError(
+                "compile a workbook as it stands, or loose source files in a "
+                "fresh workbook, but not both in one run.")
+        workbook = Path(args.workbook)
+        if not workbook.exists():
+            raise _CliError(f"{args.workbook}: no such file")
+    if workbook is None and not sources:
+        raise _CliError("check needs VBA source files or a workbook")
+
+    # Read and validate every source before Excel starts, so a typo costs
+    # nothing and never leaves a half-populated workbook behind.
+    modules: list[tuple[str, str, str]] = []
+    for path in sources:
+        if not is_vba_identifier(path.stem):
+            raise _CliError(
+                f"{path.name}: the file stem is not a valid VBA module name")
+        kind = "class" if path.suffix.lower() == ".cls" else "standard"
+        modules.append((path.stem, kind, _read_source(path)))
+
     with ExcelSession() as session:
-        if args.workbook:
+        if workbook is not None:
             # Compile the workbook exactly as-is: no injected modules.
-            session.open_workbook(args.workbook, read_only=True)
+            session.open_workbook(workbook, read_only=True)
             result = session.compile_project(watch_seconds=args.watch)
         else:
             session.new_workbook()
-            for file_name in args.files:
-                path = Path(file_name)
-                module = path.stem
-                if not is_vba_identifier(module):
-                    _print(f"skipping {path.name}: file stem is not a valid "
-                           "VBA module name")
-                    return 2
-                kind = "class" if path.suffix.lower() == ".cls" else "standard"
-                session.add_module(module,
-                                   path.read_text(encoding="utf-8-sig"),
-                                   kind=kind)
+            for module, kind, text in modules:
+                session.add_module(module, text, kind=kind)
             # Loose files are destined for the harness: compile them with
             # the support module present, the way they will actually run.
             result = session.compile_project(
@@ -257,25 +348,42 @@ def main(argv: list[str] | None = None) -> int:
                         help="also start Excel and run a smoke test")
     doctor.set_defaults(func=cmd_doctor)
 
-    run = commands.add_parser("run", help="run a procedure from a VBA file")
-    run.add_argument("file")
-    run.add_argument("--proc", default="Main")
-    run.add_argument("--timeout", type=float, default=None)
+    run = commands.add_parser(
+        "run", help="run a procedure from a VBA source file or a workbook")
+    run.add_argument(
+        "file", metavar="FILE",
+        help="a VBA source file (.bas, .cls, or any non-Office extension), "
+             "injected into a fresh workbook; or an Excel workbook, opened "
+             "read-only and run as it stands")
+    run.add_argument("--proc", default="Main",
+                     help="procedure to call, Proc or Module.Proc "
+                          "(default Main)")
+    run.add_argument("--timeout", type=float, default=None,
+                     help="seconds before the run is killed")
     run.add_argument("--arg", action="append", default=[],
                      help="argument for the procedure (repeatable; int, "
                           "float, and true/false are auto-converted)")
     run.set_defaults(func=cmd_run)
 
     check = commands.add_parser(
-        "check", help="compile-check VBA files or a workbook")
-    check.add_argument("files", nargs="*")
-    check.add_argument("--workbook", default=None)
+        "check", help="compile-check VBA source files or a workbook")
+    check.add_argument(
+        "files", nargs="*", metavar="FILE",
+        help="VBA source files to compile in a fresh workbook, or a single "
+             "Excel workbook to compile as it stands")
+    check.add_argument("--workbook", default=None, metavar="WORKBOOK",
+                       help="an Excel workbook to compile as it stands; the "
+                            "same as passing it positionally")
     check.add_argument("--watch", type=float, default=15.0,
                        help="dialog watch window in seconds (default 15)")
     check.set_defaults(func=cmd_check)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except _CliError as err:
+        _print(str(err))
+        return 2
 
 
 if __name__ == "__main__":

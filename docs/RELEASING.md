@@ -51,7 +51,7 @@ accidental release.
 
    ```powershell
    python -m pip install -e ".[dev,fuzz]"
-   python -c "import pyvbaharness; print(pyvbaharness.__file__)"
+   python -c "import pyvbaharness, pyvbaharness.__main__ as m; print(pyvbaharness.__file__); print(m.__file__)"
    ```
 
    This is not optional housekeeping. The package registers a `pytest11`
@@ -59,7 +59,18 @@ accidental release.
    startup, before `tests/conftest.py` can put `src` on the path. With a
    non-editable install of a previous version present, the suite silently
    tests the installed package instead of the working tree, and a fix under
-   test appears not to work. The path printed above must be inside `src`.
+   test appears not to work. Both paths printed above must be inside `src`.
+
+   Check a submodule as well as the package, because the two can disagree.
+   Uninstalling leaves `site-packages\pyvbaharness\__pycache__` behind, and
+   the surviving directory becomes a namespace package that wins over the
+   editable finder for submodules while `import pyvbaharness` still resolves
+   to `src`. If the second path is not in `src`, delete that directory:
+
+   ```powershell
+   Remove-Item "$(python -c 'import site;print(site.getsitepackages()[0])')\pyvbaharness" -Recurse -Force
+   python -m pip install -e ".[dev,fuzz]"
+   ```
 
 3. Run the full local validation, including the live suite. Hosted runners
    have no Office installation, so CI cannot do this for you:

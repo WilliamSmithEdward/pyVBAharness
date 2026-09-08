@@ -416,16 +416,27 @@ they do at run time.
 ```bash
 pyvbaharness doctor --live
 pyvbaharness run My.bas --proc Main --arg 42
+pyvbaharness run model.xlsm --proc Model.Recalculate
 pyvbaharness check My.bas Other.cls
-pyvbaharness check --workbook model.xlsm
+pyvbaharness check model.xlsm
 ```
 
 `python -m pyvbaharness <command>` works identically.
 
-`doctor` checks Excel, pywin32, the VBA project trust setting, and the VBE
-error-trapping mode; "Break on All Errors" sends handled errors to the
-debugger and stalls automation. `--live` additionally starts an owned Excel
-and runs a smoke test.
+A positional path routes on its extension. An Excel extension is opened as a
+workbook, so `check model.xlsm` and `check --workbook model.xlsm` do the same
+thing, and `run model.xlsm` opens it read-only and calls `--proc` from it.
+Anything else is read as VBA source and injected into a fresh workbook. A
+Word, PowerPoint, or Access document is refused with a message naming the
+session class to use instead, since the command line drives Excel only.
+
+Source files are read as UTF-8, falling back to the ANSI code page, because
+that is what VBIDE export writes.
+
+`doctor` checks each installed Office application, pywin32, the VBA project
+trust setting, and the VBE error-trapping mode; "Break on All Errors" sends
+handled errors to the debugger and stalls automation. `--live` additionally
+starts an owned Excel and runs a smoke test.
 
 Exit codes: `0` pass or accepted, `1` VBA failure or rejected compile, `2`
 infrastructure failure.
@@ -529,7 +540,7 @@ dispatcher, which accounts for the 77 ms figure.
 ## Development
 
 ```bash
-python -m pytest tests/unit                          # 176 tests, no Office
+python -m pytest tests/unit                          # 208 tests, no Office
 python -m pytest tests/live -m live -o addopts=""    # 120 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
