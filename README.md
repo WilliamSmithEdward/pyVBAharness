@@ -564,6 +564,14 @@ screen.
 | [Implementation guide](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Office behaviors |
 | [Releasing](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
 
+## Built with this
+
+[xlide-mcp](https://github.com/WilliamSmithEdward/xlide_mcp)
+is an MCP server built on this. When an agent runs a macro or a test
+suite through that server, this is what starts Office, holds the
+deadline, and terminates the instance it created rather than one the
+user was working in.
+
 ## License
 
 MIT. See [LICENSE](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE).
