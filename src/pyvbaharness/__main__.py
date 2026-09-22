@@ -96,7 +96,7 @@ def _doctor_checks() -> list[tuple[str, bool | None, str]]:
         access = _read_registry(
             winreg.HKEY_CURRENT_USER,
             rf"Software\Microsoft\Office\{office_version}"
-            rf"\{detail.security_key}\Security",
+            rf"\{detail.registry_key}\Security",
             "AccessVBOM")
         rows.append((
             label,

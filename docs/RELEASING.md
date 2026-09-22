@@ -141,7 +141,7 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 ## Limits worth knowing
 
 CI cannot validate against real Office. Hosted runners have no Office
-installation, so the 120 live tests, which are the ones that actually prove
+installation, so the 123 live tests, which are the ones that actually prove
 the harness works, only ever run on a developer machine. Treat a green CI
 badge as "the pure logic is intact and the package builds", not as "the
 harness works".

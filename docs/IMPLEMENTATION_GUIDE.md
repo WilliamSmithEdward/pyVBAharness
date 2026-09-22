@@ -311,6 +311,57 @@ once a database exists. Access also has no unsaved document at all, so
 "trust access to the VBA project object model" option, so it has no VBOM
 preflight.
 
+### 3.20 Releasing the last COM proxy can block forever
+
+Clearing the final Application reference marshals an `IUnknown::Release`
+into the host process, and a host busy shutting down does not always answer
+it. Measured 2026-09-22 across repeated Excel sessions: about one shutdown
+in three blocked at `self.app = None` in `OfficeHost.drop_references`, with
+the worker never exiting, until the supervisor's 15 second cleanup deadline
+killed worker and host together.
+
+That kill is not free. It is what writes the open document into Office's
+crash-recovery list (3.21), so a flaky release turned into a recovery prompt
+for the user.
+
+The release cannot move to another thread. COM proxies belong to the
+apartment that created them, and releasing one elsewhere is a threading
+violation even where it appears to work: doing so made shutdown 50x faster
+and was rejected for that reason. Instead `Worker._release_com` runs the
+release on the apartment thread under a watchdog that ends the process if it
+does not return. A clean release costs the 2.4 seconds Excel actually takes;
+a stalled one is abandoned at 6 seconds with `com-release: abandoned` in the
+trace, and the kill-on-close job reaps the host. That is the same outcome the
+supervisor's deadline produced, nine seconds sooner and recorded rather than
+inferred from silence.
+
+### 3.21 A terminated host leaves a recovery entry naming the document
+
+Office records what it had open under
+`HKCU\Software\Microsoft\Office\<ver>\<App>\Resiliency\DocumentRecovery`
+whenever it is terminated rather than quit, and the next launch offers to
+recover it. The harness kills its host by design on a hang, so every killed
+run left the user a Document Recovery pane naming a harness file.
+
+Measured 2026-09-22: killing a session whose only document was an unsaved
+scratch workbook wrote nothing, and killing one that had opened a workbook on
+disk wrote an entry carrying that workbook's full path.
+`Workbook.EnableAutoRecover = False` did not prevent it, so this is one of the
+few places the harness cleans up rather than prevents.
+
+Removal is scoped to documents the session owned, and that scoping is the
+whole design. On the development machine the same tree held pending recovery
+entries from two unrelated projects, so a blanket wipe of DocumentRecovery
+would have destroyed a user's unsaved work. `resiliency.py` decodes each
+entry's blob and deletes one only when a path the session actually opened
+appears inside it; `OfficeSession._document_paths` is where those paths come
+from, fed by document-opened, document-created, and save_as.
+
+The sweep runs at close unconditionally rather than only after a supervisor
+kill, because a host can be terminated by several routes: the kill, the
+kill-on-close job after an abandoned release, or a crash. Enumerating them is
+how one gets missed, and a scoped sweep with nothing to match is a no-op.
+
 ## 4. Invariants
 
 These are the guarantees the harness sells. Changing one is a contract
@@ -332,6 +383,12 @@ change: update the docs, the oracle, and the tests in the same patch.
 10. Documents open read-only by default and close without saving.
 11. A prompt that can be prevented is prevented, never dismissed after the
     fact. See section 4.1.
+12. A host that is still answering is asked to quit before it is killed. A
+    kill is for a host that has stopped answering, and it costs the user a
+    crash-recovery prompt, so it is not the default way to end a session.
+13. Anything the harness leaves in the user's environment is cleaned up
+    scoped to what this session owned, never wholesale. The recovery sweep
+    in resiliency.py is the worked example.
 
 ### 4.1 Prefer prevention, then a deterministic signal, then a deadline
 

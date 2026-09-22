@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import codegen, protocol, vbasig
+from . import codegen, protocol, resiliency, vbasig
 from .codegen import is_document_module
 from .numbering import instrument_error_lines, instrument_module
 from .lock import COMPILE_MUTEX_NAME, SessionLock, session_mutex_name
@@ -73,6 +73,13 @@ from .results import (
 _CREATE_NO_WINDOW = 0x08000000
 USER_MODULE_NAME = "PyVbaUserCode"
 
+# Abort reasons that leave the host healthy and answering. A runner error is
+# a harness-level fault, a bad target or a protocol slip, with a working
+# Office on the other end, and a recycle is deliberate. Everything else, a
+# timeout, a blocked modal, a failed cleanup, means the host is not
+# responding, where asking it to quit only delays the kill.
+_GRACEFUL_ABORT_REASONS = frozenset({"runner-error", "recycled"})
+
 
 @dataclass
 class HarnessConfig:
@@ -90,6 +97,12 @@ class HarnessConfig:
     # Failure postmortems (screenshots) land here; swept after 7 days.
     artifact_dir: Path | None = None
     screenshot_on_timeout: bool = True
+    # After a kill, delete the crash-recovery entries Office wrote for the
+    # documents this session owned, so the next launch does not greet the
+    # user with a Document Recovery pane naming a harness file. Set False to
+    # keep them, which is the only way back to changes the harness made and
+    # did not save.
+    clear_crash_recovery: bool = True
     python_executable: str = sys.executable
     extra_env: dict[str, str] = field(default_factory=dict)
     # Test seam: replaces "<python> -m pyvbaharness.worker" so the supervisor
@@ -142,6 +155,7 @@ class OfficeSession:
         self._closed = False
         self._injected: dict[str, str] = {}
         self._coverage: dict[str, tuple[int, list[int]]] = {}
+        self._document_paths: set[str] = set()
         self._readers: list[threading.Thread] = []
         self._finalizer: weakref.finalize | None = None
         self.session_id = uuid.uuid4().hex[:12]
@@ -309,6 +323,12 @@ class OfficeSession:
                 self._dead = True
         finally:
             self._ensure_owned_app_gone()
+            # Unconditional, because a host can be terminated by several
+            # routes: the supervisor's kill, the kill-on-close job after an
+            # abandoned COM release, or a crash. Enumerating them is how one
+            # gets missed, and the sweep is scoped to this session's own
+            # documents, so it is a no-op when there is nothing to clean.
+            self._clear_crash_recovery()
             # Join the pipe readers so a session's file objects are not
             # garbage collected while a thread still reads them (noisy
             # OSError at interpreter teardown otherwise).
@@ -419,23 +439,82 @@ class OfficeSession:
     # ----- abort path ------------------------------------------------------
 
     def _abort(self, reason: str) -> None:
-        """Single failure path: kill owned host, kill worker, mark dead."""
+        """Single failure path: end the host, kill the worker, mark dead.
+
+        A wedged host is killed outright, because it is not answering and
+        waiting only adds latency to a decision already made. A host that is
+        merely finished with, after a harness-level error or a deliberate
+        recycle, is asked to quit first: terminating a healthy Office writes
+        the open document into its crash-recovery list, and the user meets
+        that as a recovery pane the next time they start the application.
+        """
         if self._dead:
             return
         self._dead = True
+        quit_cleanly = False
+        if reason in _GRACEFUL_ABORT_REASONS:
+            quit_cleanly = self._quit_within_grace()
         killed = False
-        if self._manifest is not None:
-            killed = self._manifest.kill_role("app")
-        proc = self._proc
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+        if not quit_cleanly:
+            if self._manifest is not None:
+                killed = self._manifest.kill_role("app")
+            proc = self._proc
+            if proc is not None and proc.poll() is None:
+                proc.kill()
         self.events.append({
             "kind": protocol.EV_APP_KILLED,
             "session": self.session_id,
             "reason": reason,
             "killed": killed,
+            "quit_cleanly": quit_cleanly,
             "at": time.time(),
         })
+        if killed:
+            self._clear_crash_recovery()
+
+    def _quit_within_grace(self) -> bool:
+        """Ask the worker to close and quit, and wait briefly for it to go.
+
+        True once the worker process has exited, which means the host quit
+        under its own power and recorded nothing to recover. A worker that
+        is already gone returns False: the host it owned may have outlived
+        it, so the kill path still has to run.
+        """
+        proc = self._proc
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            self._write_command(protocol.CMD_SHUTDOWN, {},
+                                int(self.config.cleanup_grace_s * 1000))
+        except (OSError, ValueError, SessionDead):
+            return False
+        # The same budget close() allows, because this is the same work.
+        # A clean Excel shutdown measured 2.4 s (2026-09-22), and the
+        # watcher's own stop adds up to 2 s on top, so the bare grace is too
+        # tight: at 5 s every recycle timed out and killed a healthy host.
+        deadline = time.monotonic() + self.config.cleanup_grace_s + 10.0
+        return self._drain_until_exit(deadline) is True
+
+    def _clear_crash_recovery(self) -> None:
+        """Remove the recovery entries the kill just created.
+
+        Scoped to documents this session opened, so it can never discard
+        recovery data belonging to anything else; see resiliency.py.
+        """
+        if not self.config.clear_crash_recovery or not self._document_paths:
+            return
+        try:
+            removed = resiliency.clear_document_recovery(
+                self.app, sorted(self._document_paths))
+        except Exception:  # noqa: BLE001 - teardown must not raise
+            return
+        if removed:
+            self.events.append({
+                "kind": protocol.EV_RECOVERY_CLEARED,
+                "session": self.session_id,
+                "entries": [e.key_path for e in removed],
+                "at": time.time(),
+            })
 
     def _stderr_summary(self) -> str:
         return "\n".join(list(self._stderr_tail)[-10:]) or "(no stderr)"
@@ -462,11 +541,26 @@ class OfficeSession:
 
     def _ingest(self, event: dict[str, Any]) -> None:
         self.events.append(event)
-        if (event.get("kind") == protocol.EV_APP_CREATED
-                and self._manifest is not None):
+        kind = event.get("kind")
+        if kind == protocol.EV_APP_CREATED and self._manifest is not None:
             pid = int(event.get("pid") or 0)
             if pid > 0:
                 self._manifest.record("app", pid)
+        elif kind in (protocol.EV_DOCUMENT_OPENED,
+                      protocol.EV_DOCUMENT_CREATED):
+            self._remember_document(event)
+
+    def _remember_document(self, payload: dict[str, Any]) -> None:
+        """Record a document path this session owned.
+
+        Kept across recycles: a path opened by an earlier generation can
+        still be sitting in Office's recovery list, and the set is only ever
+        used to decide which entries are ours to remove. An unsaved document
+        has no path and leaves nothing to recover.
+        """
+        path = str(payload.get("path") or "")
+        if path:
+            self._document_paths.add(path)
 
     def _next_item(self, deadline: float) -> tuple[str, Any] | None:
         remaining = deadline - time.monotonic()
@@ -1001,9 +1095,11 @@ class OfficeSession:
 
     def save_as(self, path: str | Path,
                 timeout: float | None = None) -> dict[str, Any]:
-        return self._expect_passed(self._command(
+        data = self._expect_passed(self._command(
             protocol.CMD_SAVE_AS, {"path": str(Path(path).resolve())},
             timeout))
+        self._remember_document(data)
+        return data
 
     def compile_project(self, watch_seconds: float | None = None,
                         include_harness_support: bool = False

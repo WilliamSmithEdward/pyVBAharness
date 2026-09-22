@@ -39,6 +39,57 @@ def fake_config(tmp_path, **overrides) -> HarnessConfig:
     return HarnessConfig(**defaults)
 
 
+class TestGracefulAbort:
+    """A host that is still answering is asked to quit before it is killed.
+
+    Terminating a healthy Office writes the open document into its
+    crash-recovery list, and the user meets that as a recovery pane the next
+    time they start the application.
+    """
+
+    def _last_kill(self, session) -> dict:
+        for event in reversed(session.events):
+            if event.get("kind") == "app-killed":
+                return event
+        return {}
+
+    def test_recycle_quits_instead_of_killing(self, tmp_path):
+        session = ExcelSession(fake_config(tmp_path))
+        try:
+            session.run_macro("Mod.Ok")
+            session.recycle()
+            event = self._last_kill(session)
+            assert event.get("reason") == "recycled"
+            assert event.get("quit_cleanly") is True
+            assert event.get("killed") is False
+        finally:
+            session.close()
+
+    def test_a_wedged_host_is_killed_without_waiting(self, tmp_path):
+        """A timeout means the host is not answering, so asking it to quit
+        would only add latency to a decision already made."""
+        session = ExcelSession(fake_config(tmp_path))
+        try:
+            result = session.run_macro("Hang.Forever")
+            assert result.outcome == TIMEOUT
+            event = self._last_kill(session)
+            assert event.get("quit_cleanly") is False
+            assert event.get("killed") is True
+        finally:
+            session.close()
+
+    def test_a_dead_worker_falls_through_to_the_kill(self, tmp_path):
+        """Nothing is left to ask, and the host it owned may have outlived
+        it, so the kill path still has to run."""
+        session = ExcelSession(fake_config(tmp_path))
+        try:
+            result = session.run_macro("Die.Now")
+            assert result.outcome == RUNNER_ERROR
+            assert self._last_kill(session).get("quit_cleanly") is False
+        finally:
+            session.close()
+
+
 class TestHappyPath:
     def test_run_and_clean_close(self, tmp_path):
         session = ExcelSession(fake_config(tmp_path))

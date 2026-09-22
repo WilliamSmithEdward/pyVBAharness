@@ -358,8 +358,8 @@ results = excel.run_batch([
 ])
 ```
 
-Measured against equivalent serial calls: 5.4x at 200 calls and 47x at
-1000, where per-call cost falls to 0.062 ms. Arguments must be scalars.
+Measured against equivalent serial calls: 4.5x at 200 calls and 54x at
+1000, where per-call cost falls to 0.063 ms. Arguments must be scalars.
 
 ## Parallel execution
 
@@ -386,8 +386,8 @@ with SessionPool(4) as pool:
     )[-1])
 ```
 
-Throughput on a 16-core machine with 120 ms tasks: 2.0x at two members, 3.7x
-at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.0.json`). Each
+Throughput on a 16-core machine with 120 ms tasks: 1.9x at two members, 3.6x
+at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.3.json`). Each
 member uses 150 to 300 MB of RAM. Compile checks remain serialized
 machine-wide inside a pool because they drive the visible VBE, which is a
 shared surface; hidden runs and range IO do not interfere with each other.
@@ -491,6 +491,14 @@ clicked dialog still exists. Deadlines remain as the backstop for the one
 case no signal covers, a COM call into a blocked apartment, which cannot be
 interrupted from inside the process making it.
 
+A kill is the last resort rather than the normal exit, because terminating
+Office registers whatever it had open for crash recovery and the user meets
+that as a recovery pane on their next launch. A host that is still answering
+is asked to quit first. Where a run has to be killed, the session deletes
+the recovery entries for the documents it opened, scoped to those documents
+so recovery data from anything else is left alone. Pass
+`clear_crash_recovery=False` to keep them.
+
 ## Process ownership
 
 The harness creates its own Excel instance and never attaches to a running
@@ -513,24 +521,25 @@ workbook. Workbook-qualified targets are rejected before any COM call.
 ## Performance
 
 Measured on Excel 365 x64 with Python 3.14
-(`benchmarks/output/baseline-1.1.0.json`):
+(`benchmarks/output/baseline-1.1.3.json`):
 
 | Operation | Median |
 | --- | --- |
-| Session startup and teardown | 3.0 s (0.6 s to start, 2.4 s for Excel to exit) |
+| Session startup and teardown | 3.1 s (0.6 s to start, the rest to quit) |
 | Run a procedure, same target as previous call | 0.5 ms |
-| Run a procedure with arguments | 0.6 ms |
-| `run_vba` with unchanged source | 0.7 ms |
-| Run a different target (dispatcher regenerated) | 77 ms |
-| Batched calls, 1000 per batch | 0.062 ms each |
-| Compile check, clean project | 0.9 s |
-| Write 10,000 cells | 66 ms |
+| Run a procedure with arguments | 0.5 ms |
+| `run_vba` with unchanged source | 0.6 ms |
+| Run a different target (dispatcher regenerated) | 85 ms |
+| Batched calls, 1000 per batch | 0.063 ms each |
+| Compile check, clean project | 1.0 s |
+| Write 10,000 cells | 68 ms |
 | Read 10,000 cells | 8 ms |
 
-Most of a session's lifetime cost is Excel exiting, not starting: Quit
-returns well before the process does, and teardown waits on the process
-handle to confirm termination rather than assuming it. Reuse a session
-across runs, or a `SessionPool`, if that matters.
+Most of a session's lifetime cost is Excel quitting, not starting. Releasing
+the last COM reference is what lets it go, and that release occasionally
+blocks; it is bounded at 6 seconds, after which the worker ends and the
+kill-on-close job reaps the host. Reuse a session across runs, or a
+`SessionPool`, if that matters.
 
 Per-run cost depends on three caches: resolved target signatures, injected
 source, and the generated dispatcher. Repeated calls to the same target with
@@ -540,8 +549,8 @@ dispatcher, which accounts for the 77 ms figure.
 ## Development
 
 ```bash
-python -m pytest tests/unit                          # 208 tests, no Office
-python -m pytest tests/live -m live -o addopts=""    # 120 tests, real Office
+python -m pytest tests/unit                          # 219 tests, no Office
+python -m pytest tests/live -m live -o addopts=""    # 123 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
 ```

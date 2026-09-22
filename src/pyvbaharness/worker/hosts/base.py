@@ -333,18 +333,34 @@ class OfficeHost:
     def _quit_app(self) -> None:
         self.app.Quit()
 
-    def release(self) -> None:
-        """Drop COM references; hangs here are covered by the supervisor's
-        cleanup watchdog, not by local timeouts."""
+    def drop_references(self) -> None:
+        """Release the COM proxies, which is what lets the host exit.
+
+        This can block. Clearing the last Application reference marshals a
+        Release into the host process, and a host that is busy shutting down
+        does not always answer it: measured 2026-09-22, about one shutdown in
+        three stalled here indefinitely. The host will not exit while a
+        client still holds a reference, so this cannot be deferred until
+        after it goes; the caller bounds it instead (see Worker.shutdown).
+        """
         self.document = None
         self._compile_control = None
         self.app = None
         gc.collect()
         gc.collect()
+
+    def uninitialize(self) -> None:
+        """Leave the apartment. Must run on the thread that entered it, so
+        it is only called when drop_references finished there."""
         try:
             pythoncom.CoUninitialize()
         except Exception:
             pass
+
+    def release(self) -> None:
+        """Drop references and leave the apartment, unbounded."""
+        self.drop_references()
+        self.uninitialize()
 
     # ----- documents -------------------------------------------------------
 

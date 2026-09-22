@@ -24,6 +24,13 @@ from ..results import PASSED, RUNNER_ERROR, VBA_ERROR
 from .hosts import HostError, build_host
 from .watcher import DialogWatcher, WatcherRecord
 
+# How long shutdown waits for the COM proxies to release before abandoning
+# the attempt. A clean release finishes well inside this (the whole
+# shutdown measured 2.4 s for Excel), and the supervisor allows 15 s in
+# total, so this leaves room to report an abandoned release rather than be
+# killed mid-way.
+COM_RELEASE_WAIT_S = 6.0
+
 
 class ProgressTail(threading.Thread):
     """Tails the VBA progress file and emits vba-progress events.
@@ -193,10 +200,58 @@ class Worker:
             _emit(protocol.EV_PHASE, {"phase": "app-quit",
                                       "outcome": "failed",
                                       "message": str(err)})
-        self.host.release()
-        _emit(protocol.EV_PHASE, {"phase": "com-release", "outcome": "passed"})
+        # Dropping the COM proxies is what actually lets the host exit, and
+        # it is also the one step that can block forever: measured
+        # 2026-09-22, about one shutdown in three stalled on
+        # `self.app = None` until the supervisor's 15 s deadline killed
+        # worker and host together, and that kill is what writes the
+        # document into Office's crash-recovery list. Bounding it here turns
+        # the stall into a worker that still exits under its own power.
+        started = time.time()
+        self._release_com()
+        _emit(protocol.EV_PHASE, {
+            "phase": "com-release", "outcome": "passed",
+            "duration_ms": int((time.time() - started) * 1000)})
         if watcher is not None:
             watcher.stop()
+
+    def _release_com(self) -> None:
+        """Release COM on this thread, under a hard bound.
+
+        Dropping the last proxy marshals a Release into the host process,
+        and a host busy shutting down does not always answer: measured
+        2026-09-22, about one shutdown in three blocked here until the
+        supervisor's 15 s deadline killed worker and host together, and that
+        kill is what writes the document into Office's crash-recovery list.
+
+        The release cannot simply move to another thread. COM proxies belong
+        to the apartment that created them, and releasing one elsewhere is a
+        threading violation even where it appears to work. So the release
+        stays here and a watchdog ends the process instead. The host is then
+        reaped by the kill-on-close job, which is the same outcome the
+        supervisor's deadline produces, about ten seconds sooner and with
+        the reason recorded rather than inferred from silence.
+        """
+        finished = threading.Event()
+
+        def watchdog() -> None:
+            if finished.wait(COM_RELEASE_WAIT_S):
+                return
+            _emit(protocol.EV_PHASE, {
+                "phase": "com-release", "outcome": "abandoned",
+                "message": f"COM release did not return within "
+                           f"{COM_RELEASE_WAIT_S:.0f}s; ending the worker so "
+                           "the host is reaped rather than left hanging."})
+            sys.stderr.flush()
+            sys.stdout.flush()
+            os._exit(0)
+
+        threading.Thread(target=watchdog, daemon=True,
+                         name="pyvba-com-release-watchdog").start()
+        try:
+            self.host.release()
+        finally:
+            finished.set()
 
     # ----- command execution ----------------------------------------------
 

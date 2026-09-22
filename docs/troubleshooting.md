@@ -139,6 +139,22 @@ What this means in practice:
 
 Excel, Word and Access have none of these limits.
 
+## Office offers to recover a document after a harness run
+
+Office registers whatever it had open for recovery whenever it is terminated
+rather than quit, so a run the harness had to kill used to leave a Document
+Recovery pane naming a harness file on your next launch.
+
+Two things changed. A host that is still answering is now asked to quit
+first, so an ordinary end of session is a clean exit with nothing recorded.
+Where a kill is unavoidable, because the run hung, the session deletes the
+recovery entries for the documents it opened as it tears down.
+
+The sweep is scoped to those documents and never touches anything else, so
+recovery data from your other work is left alone. If you would rather keep
+the entries, because they are the only route back to changes the harness
+made and did not save, pass `clear_crash_recovery=False` in `HarnessConfig`.
+
 ## Teardown reports a "Save As" dialog
 
 Closing raised a prompt the harness must not answer for you, so it killed

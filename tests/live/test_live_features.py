@@ -413,6 +413,91 @@ End Function
                 assert fresh.oracle_issues == []
 
 
+class TestCleanTeardown:
+    """Terminating a healthy Office is what puts a document into its
+    crash-recovery list, and the user meets that as a recovery pane on their
+    next launch. Quit first where the host is answering, and clear up after
+    a kill where it is not.
+    """
+
+    SPIN = """
+Public Sub Spin()
+    Do While True
+    Loop
+End Sub
+"""
+
+    @staticmethod
+    def _recovery_entries_naming(path) -> list[str]:
+        import winreg
+
+        from pyvbaharness import apps, resiliency
+
+        wanted = str(path).lower()
+        found = []
+        for version in resiliency.office_versions():
+            base = (rf"Software\Microsoft\Office\{version}"
+                    rf"\{apps.info('excel').registry_key}"
+                    r"\Resiliency\DocumentRecovery")
+            for name in resiliency._subkeys(winreg.HKEY_CURRENT_USER, base):
+                text = resiliency._entry_text(
+                    winreg.HKEY_CURRENT_USER, f"{base}\\{name}").lower()
+                if wanted in text:
+                    found.append(name)
+        return found
+
+    def test_recycle_quits_the_host_instead_of_killing_it(self, session):
+        session.run_vba(BASIC_SOURCE, proc="Main")
+        pid = session.app_pid
+        session.recycle()
+        killed = [e for e in session.events
+                  if e.get("kind") == "app-killed"][-1]
+        assert killed["reason"] == "recycled"
+        assert killed["quit_cleanly"] is True, (
+            "a healthy host should be asked to quit, not terminated")
+        assert killed["killed"] is False
+        deadline = time.monotonic() + 20.0
+        while is_process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.2)
+        assert not is_process_alive(pid)
+        assert session.run_vba(BASIC_SOURCE, proc="Main").outcome == PASSED
+
+    def test_a_killed_run_leaves_no_recovery_entry(self, tmp_path):
+        """A hang has to be killed, and the kill registers the workbook for
+        recovery. The session clears its own entry on the way out."""
+        book = tmp_path / "recovery-probe.xlsm"
+        # exclusive=False: the module-scoped session already holds the
+        # machine-wide lock for this app.
+        killed_session = ExcelSession(
+            HarnessConfig(default_timeout_s=30.0, exclusive=False))
+        try:
+            killed_session.new_workbook()
+            killed_session.add_module("Bench", self.SPIN)
+            killed_session.save_as(book)
+            assert killed_session.run_macro(
+                "Bench.Spin", timeout=5.0).outcome == TIMEOUT
+        finally:
+            killed_session.close()
+        assert book.exists()
+        left = self._recovery_entries_naming(book)
+        assert left == [], (
+            f"a recovery entry for {book.name} survived teardown: {left}")
+
+    def test_cleanup_can_be_turned_off(self, tmp_path):
+        """The entry is the only route back to changes the harness made and
+        did not save, so keeping it stays available."""
+        config = HarnessConfig(default_timeout_s=30.0, exclusive=False,
+                               clear_crash_recovery=False)
+        session = ExcelSession(config)
+        try:
+            session.new_workbook()
+            session.add_module("Bench", self.SPIN)
+            session.save_as(tmp_path / "kept.xlsm")
+        finally:
+            session.close()
+        assert session.config.clear_crash_recovery is False
+
+
 class TestExcelProvenance:
     def test_version_recorded_in_trace(self, session):
         created = [e for e in session.events

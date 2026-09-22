@@ -30,6 +30,7 @@ EV_DOCUMENT_CLOSED = "document-closed"
 EV_APP_QUIT = "app-quit"
 EV_APP_KILLED = "app-killed"
 EV_PHASE = "host-phase"
+EV_RECOVERY_CLEARED = "crash-recovery-cleared"
 EV_PROGRESS = "vba-progress"
 
 # Command names understood by the worker.

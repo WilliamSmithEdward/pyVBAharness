@@ -22,9 +22,10 @@ class AppInfo:
     progid: str
     image_name: str
     document_noun: str
-    #: Registry subkey under Software\Microsoft\Office\<ver>\ for Trust
-    #: Center settings. Empty when the app has no VBOM gate at all.
-    security_key: str
+    #: Subkey under Software\Microsoft\Office\<ver>\ that holds this app's
+    #: per-user settings: Trust Center, Resiliency, and the rest. Every app
+    #: has one; whether the VBOM gate applies is needs_vbom, separately.
+    registry_key: str
     #: False when a second CoCreateInstance returns the running process
     #: instead of starting a new one. A single-instance app cannot be
     #: pooled, cannot run two concurrent sessions, and cannot be used at all
@@ -50,20 +51,20 @@ APPS: dict[str, AppInfo] = {
     "excel": AppInfo(
         key="excel", label="Excel", progid="Excel.Application",
         image_name="EXCEL.EXE", document_noun="workbook",
-        security_key="Excel", save_formats=(".xlsm", ".xlsb"),
+        registry_key="Excel", save_formats=(".xlsm", ".xlsb"),
         document_extensions=(".xlsm", ".xlsb", ".xlsx", ".xls", ".xlam",
                              ".xltm", ".xltx", ".xlt"),
         has_grid=True),
     "word": AppInfo(
         key="word", label="Word", progid="Word.Application",
         image_name="WINWORD.EXE", document_noun="document",
-        security_key="Word", save_formats=(".docm", ".dotm"),
+        registry_key="Word", save_formats=(".docm", ".dotm"),
         document_extensions=(".docm", ".dotm", ".docx", ".doc", ".dotx",
                              ".dot")),
     "powerpoint": AppInfo(
         key="powerpoint", label="PowerPoint",
         progid="PowerPoint.Application", image_name="POWERPNT.EXE",
-        document_noun="presentation", security_key="PowerPoint",
+        document_noun="presentation", registry_key="PowerPoint",
         # Measured: two CoCreateInstance calls returned one process.
         multi_instance=False,
         # Measured: "Invalid request. Hiding the application window is not
@@ -75,9 +76,10 @@ APPS: dict[str, AppInfo] = {
     "access": AppInfo(
         key="access", label="Access", progid="Access.Application",
         image_name="MSACCESS.EXE", document_noun="database",
+        registry_key="Access",
         # Access exposes no "trust access to the VBA project" option; the
         # VBE object model is always reachable.
-        security_key="", needs_vbom=False,
+        needs_vbom=False,
         # Access writes the database continuously; there is nothing to
         # save_as.
         save_formats=(),
