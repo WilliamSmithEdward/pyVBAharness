@@ -308,7 +308,8 @@ def sweep_stale_manifests(directory: Path | None = None,
     """Kill exact-match orphans from manifests older than the threshold.
 
     Only processes whose PID and creation time still match the manifest are
-    touched; everything else is stale bookkeeping and just gets deleted.
+    touched; everything else is stale bookkeeping and just gets deleted,
+    including the temp files a killed worker leaves mid-rename.
     Returns human-readable notes about what was done.
     """
     directory = directory or MANIFEST_DIR
@@ -346,4 +347,48 @@ def sweep_stale_manifests(directory: Path | None = None,
             path.unlink(missing_ok=True)
         except OSError:
             pass
+    _sweep_stale_temp_files(directory, now, stale_after_s)
     return notes
+
+
+def _sweep_stale_temp_files(directory: Path, now: float,
+                            stale_after_s: float) -> None:
+    """Delete manifest temp files no live session is still writing.
+
+    ``record`` writes ``<session>.tmp`` and renames it onto
+    ``<session>.json``. A worker killed between those two steps leaves the
+    temp file behind, which the live suite does routinely: its timeout and
+    modal-block tests kill workers on purpose. Nothing swept these, so they
+    accumulated in the manifest directory indefinitely (observed
+    2026-09-22, a temp file survived a full live run with both its recorded
+    pids long dead).
+
+    Nothing is killed from a temp file, only deleted. The rename window is
+    microseconds wide, so a temp file that outlives the stale threshold has
+    a ``.json`` beside it holding the same snapshot or an earlier one, and
+    the sweep above reaps from that. The only temp file without one comes
+    from the first ``record`` call, which has nothing recorded yet but the
+    worker whose death left it there.
+    """
+    for path in directory.glob("*.tmp"):
+        try:
+            # The file's own timestamp rather than the written_at inside it,
+            # because a half-written temp file is not valid JSON and has no
+            # readable timestamp. The two agree to within a rename.
+            if now - path.stat().st_mtime < stale_after_s:
+                continue
+        except OSError:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Unreadable means a partial write, which is exactly the thing
+            # being cleaned up. Age is the only guard it can be given, and
+            # it is enough: nothing spends the stale threshold mid-rename.
+            data = None
+        if isinstance(data, dict) and _worker_still_running(data):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass

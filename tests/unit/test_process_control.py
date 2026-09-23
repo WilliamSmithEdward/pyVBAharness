@@ -108,3 +108,95 @@ class TestSweep:
         }), encoding="utf-8")
         sweep_stale_manifests(tmp_path, stale_after_s=60)
         assert not path.exists()
+
+
+class TestSweepOfTempFiles:
+    """record() writes <session>.tmp and renames it onto <session>.json, so
+    a worker killed in between leaves the temp file behind. The live
+    suite's timeout and modal-block tests kill workers on purpose, and
+    nothing used to delete what they left.
+    """
+
+    def _aged(self, path, seconds):
+        stamp = time.time() - seconds
+        os.utime(path, (stamp, stamp))
+
+    def test_stale_temp_file_is_deleted(self, tmp_path):
+        path = tmp_path / "halfwritten.tmp"
+        path.write_text(json.dumps({
+            "session": "halfwritten",
+            "written_at": time.time() - 10_000,
+            "worker": {"pid": 0x7FFFFFF0, "creation": 1},
+        }), encoding="utf-8")
+        self._aged(path, 10_000)
+        sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert not path.exists()
+
+    def test_a_live_session_mid_write_is_spared(self, tmp_path):
+        """A temp file belonging to a running session is a rename in
+        progress, not an orphan."""
+        path = tmp_path / "writing.tmp"
+        path.write_text(json.dumps({
+            "session": "writing",
+            "written_at": time.time() - 10_000,
+            # This process stands in for a worker that is still running.
+            "worker": {"pid": os.getpid(),
+                       "creation": process_creation_time(os.getpid())},
+        }), encoding="utf-8")
+        self._aged(path, 10_000)
+        sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert path.exists(), "a live session's temp file was swept"
+
+    def test_a_fresh_temp_file_is_spared(self, tmp_path):
+        path = tmp_path / "justnow.tmp"
+        path.write_text("{", encoding="utf-8")
+        sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert path.exists()
+
+    def test_a_truncated_temp_file_is_deleted_on_age_alone(self, tmp_path):
+        """A partial write is not valid JSON, so it cannot be asked whose
+        it is. Age is the only guard available, and nothing spends the
+        stale threshold mid-rename."""
+        path = tmp_path / "truncated.tmp"
+        path.write_text('{"session": "trunc", "worker": {"pid": 12',
+                        encoding="utf-8")
+        self._aged(path, 10_000)
+        sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert not path.exists()
+
+    def test_no_process_is_killed_from_a_temp_file(self, tmp_path):
+        """A temp file that outlives the rename window has a .json beside
+        it holding the same snapshot, and that is what reaps. Recording
+        this process as the host proves nothing here is killed from a temp
+        file: the test would not survive it."""
+        path = tmp_path / "hostonly.tmp"
+        path.write_text(json.dumps({
+            "session": "hostonly",
+            "written_at": time.time() - 10_000,
+            "worker": {"pid": 0x7FFFFFF0, "creation": 1},
+            "app": {"pid": os.getpid(),
+                    "creation": process_creation_time(os.getpid())},
+        }), encoding="utf-8")
+        self._aged(path, 10_000)
+        notes = sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert notes == []
+        assert not path.exists()
+
+    def test_the_json_beside_a_temp_file_still_reaps(self, tmp_path):
+        """Deleting temp files must not shadow the sweep's real job."""
+        (tmp_path / "pair.tmp").write_text(json.dumps({
+            "session": "pair",
+            "written_at": time.time() - 10_000,
+            "worker": {"pid": 0x7FFFFFF0, "creation": 1},
+        }), encoding="utf-8")
+        self._aged(tmp_path / "pair.tmp", 10_000)
+        manifest = tmp_path / "pair.json"
+        manifest.write_text(json.dumps({
+            "session": "pair",
+            "written_at": time.time() - 10_000,
+            "worker": {"pid": 0x7FFFFFF0, "creation": 1},
+            "app": {"pid": 0x7FFFFFF1, "creation": 1},
+        }), encoding="utf-8")
+        sweep_stale_manifests(tmp_path, stale_after_s=60)
+        assert not manifest.exists()
+        assert not (tmp_path / "pair.tmp").exists()
