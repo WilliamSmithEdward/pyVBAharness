@@ -421,6 +421,79 @@ So there is deliberately no mitigation here. Adding a sweep for
 `StartupItems` would be complexity against a condition that could not be made
 to persist.
 
+### 3.25 Showing the VBE costs the process about 7x, permanently
+
+Measured 2026-09-22 on Excel 16. With the VBE never shown, a warm
+`run_macro` round trip cost 0.53 ms. After `Application.VBE.MainWindow.Visible
+= True`, the same call cost 3.49 ms, and it stayed there. None of the obvious
+ways back worked:
+
+- setting `MainWindow.Visible = False` reports success and reads back
+  `False`, and the window is visible again on the next read,
+- `MainWindow.Close` fails with E_FAIL,
+- hiding the host as well changes nothing,
+- twelve seconds of idle changes nothing.
+
+The window can be hidden but the VBE cannot be unloaded, and a loaded VBE is
+in the path of every call. Nothing else in `start_compile` costs: reading
+`VBE.VBProjects` and walking `VBE.CommandBars` for the Compile control both
+measured at the 0.53 ms baseline.
+
+So `start_compile` reads the Compile control's `Enabled` state *before*
+showing anything. When it is disabled there is nothing to compile, therefore
+nothing that can raise a dialog, therefore no reason to show the VBE, and the
+session keeps its speed. When a compile will actually fire, the host and the
+VBE are shown exactly as before, because 3.11 still applies: a hidden host
+turns a compile rejection into a silent accept. The saving is real but
+narrow, since injecting a module dirties the project and any compile after
+that genuinely fires.
+
+The practical consequence for callers is in section 9: a session that runs a
+compile check pays the tax for the rest of its life, so compile last, or
+recycle after.
+
+### 3.26 A dispatcher entry outlives the signature it was generated from
+
+`_ensure_dispatcher` keys its entries on `(module, proc, argument count)`.
+That key does not record whether the target is a `Sub` or a `Function`, and
+a module write used to clear the resolved-signature cache but not the
+dispatcher. So a target that changed shape kept its old call shape.
+
+Measured 2026-09-22 on Excel 16, both directions broken and neither
+reported honestly:
+
+- `Sub Main` rewritten as `Function Main` returned `value=None` with
+  `outcome=passed`, silently dropping the 42 it returned,
+- `Function Main` rewritten as `Sub Main` kept `resultValue = Main`, which
+  raised a VBA dialog and ended the run `modal-blocked`.
+
+`_invalidate_resolved` now drops both caches for the module that was
+written, and `remove_module` runs the same invalidation, because an entry
+calling into a module that no longer exists stops the whole dispatcher
+module compiling.
+
+### 3.27 One uncompilable entry takes the whole dispatcher with it
+
+Entries accumulate in one module (3.26), which is what makes switching
+target free. The cost of sharing is that a target whose generated call will
+not compile stops every other entry in the module compiling too. A `Private`
+Sub is the realistic way in: `discover_tests` matches it, since the
+declaration parser does not record visibility, and a direct call from
+another module cannot reach it.
+
+Two things keep that to one failed run, which is what it cost before entries
+shared a module. `prepare_targets` checks the batch compiles and empties the
+registry if it does not, putting every target back on the lazy path. And a
+failed call is retried alone, but only after the sentinel below proves the
+module did not compile.
+
+The sentinel matters more than it looks. Retrying a call that already ran
+would repeat the target's side effects, so the retry needs proof the target
+never started. Every generated build carries `PyVbaReady`, a trivial
+function: VBA compiles a module before running anything in it, so a
+`PyVbaReady` that answers proves the module is sound and the failure belongs
+to the target, and one that does not answer proves nothing in the module ran.
+
 ## 4. Invariants
 
 These are the guarantees the harness sells. Changing one is a contract
@@ -633,35 +706,64 @@ of these behaviors appear only in specific orders.
 ## 9. Performance notes
 
 Current measured costs (Excel 365 x64, Python 3.14,
-`benchmarks/output/baseline-1.0.0.json`):
+`benchmarks/output/baseline-1.1.5.json`):
 
 | Operation | Cost |
 | --- | --- |
-| Session startup and teardown | 0.5 s warm |
+| Session startup and teardown | 3.4 s |
 | Warm run, same target | 0.5 ms |
-| Run with arguments | 0.7 ms |
-| `run_vba` with identical source (cache hit) | 0.9 ms |
-| Retarget (dispatcher regenerated) | 76 ms |
-| Batch, 1000 calls | 0.094 ms per call (6.5x) |
-| Compile check, clean project | 1.0 s |
-| Write 10,000 cells | 63 ms |
-| Read 10,000 cells | 9 ms |
+| Run with arguments | 0.5 ms |
+| `run_vba` with identical source (cache hit) | 0.6 ms |
+| Run after switching target | 0.7 ms |
+| Registering a target not run before | 25 ms |
+| Batch, 1000 calls | 0.064 ms per call (42x) |
+| Compile check, clean project | 0.8 s |
+| Write 10,000 cells | 80 ms |
+| Read 10,000 cells | 8 ms |
 
 Where the speed comes from, so you do not accidentally remove it:
 
 - **Signature cache** (`OfficeHost._resolved`): resolving a target used to
   read module source through VBE COM on every run. Caching it took warm runs
-  from 15 ms to 0.6 ms. Invalidated by `_write_module`.
+  from 15 ms to 0.6 ms. A qualified target names the only module whose
+  rewrite can change it, so writing anything else leaves it alone; a bare
+  target is searched across every component and goes on any write.
+- **Declaration cache** (`_procs_cache`): a module's source arrives over COM
+  in one piece, so resolving several targets in one module used to fetch and
+  parse it once per target, 23.8 ms each.
+- **Component caches** (`_component_map`, `_components_cache`): reaching
+  `VBComponents` is a chain of cross-process property reads, and finding a
+  component by name costs one read per component. Both are dropped by
+  `_invalidate_resolved` and by `drop_references`, which matters: a COM
+  proxy left in either would keep the host alive at teardown (3.20).
 - **Injection cache** (`ExcelSession._injected`): identical source is never
   resent.
-- **Dispatcher cache** (`_call_signature`): regenerated only when the
-  (module, proc, arity) changes, which is why retargeting costs 97 ms and
-  repeating does not.
+- **Dispatcher entries** (`_call_targets`, `_call_entries`): one entry per
+  target, accumulated, so switching back to a target already registered
+  costs nothing and only a target new to the session rewrites the module.
+  This is the difference between a 30-test suite spending 99% of its time
+  rewriting one module and not: 2.43 s to 0.20 s, measured 2026-09-22.
+- **`prepare_targets`**: registers a known set in one rewrite instead of one
+  each. `run_tests` uses it, which is what takes a suite's first pass down
+  to a single write.
+- **In-place module writes**: replacing a component's code lines rather than
+  removing the component and adding a fresh one. The old path cost per
+  write, not per line: 64.1 ms for a 3-line module and 68.1 ms for a
+  60-procedure one, against 21.8 ms and 26.3 ms in place.
 - **Batching**: one COM round trip for many calls. The win grows with size
-  (2.7x at 50 calls, 9.9x at 3000).
+  (11.6x at 200 calls, 42x at 1000).
+
+Two costs are worth designing around rather than optimizing:
+
+- A compile check shows the VBE, and that costs the process about 7x for
+  the rest of its life (3.25). Compile last, or recycle the session after.
+- Registering a target costs a module write, and a module write resets VBA
+  module-level state. That is why the harness re-pushes the progress path
+  and coverage arrays afterwards (3.4), and why `prepare_targets` is worth
+  using when the set of targets is known.
 
 If you add a per-run COM call, measure before and after. A single extra
-round trip is roughly a 50% regression on the warm path now.
+round trip is roughly a 100% regression on the warm path now.
 
 ## 10. Definition of done
 

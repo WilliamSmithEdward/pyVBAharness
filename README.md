@@ -386,8 +386,8 @@ with SessionPool(4) as pool:
     )[-1])
 ```
 
-Throughput on a 16-core machine with 120 ms tasks: 1.9x at two members, 3.6x
-at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.4.json`). Each
+Throughput on a 16-core machine with 120 ms tasks: 2.0x at two members, 4.0x
+at four, 5.8x at six (`benchmarks/output/pool-baseline-1.1.5.json`). Each
 member uses 150 to 300 MB of RAM. Compile checks remain serialized
 machine-wide inside a pool because they drive the visible VBE, which is a
 shared surface; hidden runs and range IO do not interfere with each other.
@@ -521,18 +521,19 @@ workbook. Workbook-qualified targets are rejected before any COM call.
 ## Performance
 
 Measured on Excel 365 x64 with Python 3.14
-(`benchmarks/output/baseline-1.1.4.json`):
+(`benchmarks/output/baseline-1.1.5.json`):
 
 | Operation | Median |
 | --- | --- |
-| Session startup and teardown | 3.1 s (0.6 s to start, the rest to quit) |
+| Session startup and teardown | 3.3 s (0.6 s to start, the rest to quit) |
 | Run a procedure, same target as previous call | 0.5 ms |
 | Run a procedure with arguments | 0.5 ms |
 | `run_vba` with unchanged source | 0.6 ms |
-| Run a different target (dispatcher regenerated) | 85 ms |
-| Batched calls, 1000 per batch | 0.063 ms each |
-| Compile check, clean project | 1.0 s |
-| Write 10,000 cells | 68 ms |
+| Run a different target | 0.6 ms |
+| Run a target this session has not run before | 25 ms |
+| Batched calls, 1000 per batch | 0.064 ms each |
+| Compile check, clean project | 0.9 s |
+| Write 10,000 cells | 83 ms |
 | Read 10,000 cells | 8 ms |
 
 Most of a session's lifetime cost is Excel quitting, not starting. Releasing
@@ -541,16 +542,23 @@ blocks; it is bounded at 6 seconds, after which the worker ends and the
 kill-on-close job reaps the host. Reuse a session across runs, or a
 `SessionPool`, if that matters.
 
-Per-run cost depends on three caches: resolved target signatures, injected
-source, and the generated dispatcher. Repeated calls to the same target with
-unchanged source hit all three. Changing the target regenerates the
-dispatcher, which accounts for the 77 ms figure.
+Per-run cost depends on caching: resolved target signatures, injected source,
+and the generated dispatcher. The dispatcher keeps an entry for every target
+the session has run, so only a target it has not seen before costs a module
+write, and switching back and forth between targets costs a warm run. Where
+the set of targets is known in advance, `prepare_targets` registers them in a
+single write; `run_tests` does this, which is why a suite pays one write
+rather than one per test.
+
+One cost is worth planning around: a compile check has to show the VBE, and
+every COM call in that Excel process is roughly 7x slower afterwards, for
+good. Run your compile checks last, or recycle the session after one.
 
 ## Development
 
 ```bash
-python -m pytest tests/unit                          # 238 tests, no Office
-python -m pytest tests/live -m live -o addopts=""    # 123 tests, real Office
+python -m pytest tests/unit                          # 241 tests, no Office
+python -m pytest tests/live -m live -o addopts=""    # 129 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py
 ```

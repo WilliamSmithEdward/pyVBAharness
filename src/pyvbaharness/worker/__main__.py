@@ -378,6 +378,9 @@ class Worker:
             return host.save_as(str(params["path"]))
         if name == protocol.CMD_LIST_PROCS:
             return {"procs": host.list_procs(str(params["module"]))}
+        if name == protocol.CMD_PREPARE_TARGETS:
+            return host.prepare_targets(
+                [str(t) for t in params.get("targets", [])])
         if name == protocol.CMD_SET_VISIBLE:
             return host.set_visible(bool(params.get("visible", False)))
         if name == protocol.CMD_COMPILE:

@@ -908,6 +908,26 @@ class OfficeSession:
             protocol.CMD_LIST_PROCS, {"module": module}, None))
         return data.get("procs", [])
 
+    def prepare_targets(self, targets: list[str],
+                        timeout: float | None = None) -> list[str]:
+        """Register run targets up front, in one dispatcher rewrite.
+
+        The harness generates a dispatcher entry per target it runs, and
+        registering one rewrites a module. Doing that lazily costs a rewrite
+        per new target; naming them here costs one for the batch. Worth it
+        whenever the set of procedures is known in advance, which is why
+        run_tests does it. Returns the targets that were registered: names
+        that do not resolve are skipped, and still report their own error
+        when run.
+
+        Purely an optimization. Running a target that was never prepared
+        works exactly as before.
+        """
+        data = self._expect_passed(self._command(
+            protocol.CMD_PREPARE_TARGETS, {"targets": list(targets)},
+            timeout))
+        return [str(name) for name in data.get("prepared", [])]
+
     def run_macro(self, target: str, *args: Any,
                   timeout: float | None = None,
                   idle_timeout: float | None = None,
@@ -1020,6 +1040,15 @@ class OfficeSession:
                 raise ValueError(
                     f"Unknown test procedure(s): {', '.join(missing)}")
             selected = [lookup[t.lower()] for t in tests]
+
+        # One dispatcher rewrite for the whole suite instead of one per
+        # test. Best effort: a target this skips still runs the normal way.
+        if len(selected) > 1:
+            try:
+                self.prepare_targets([f"{module}.{name}"
+                                      for name in selected])
+            except HarnessError:
+                pass
 
         results: list[TestCaseResult] = []
         for index, name in enumerate(selected):
@@ -1160,7 +1189,8 @@ class OfficeSession:
                     dialog=dialogs[0] if dialogs else None,
                     message=str((dialog_payload or {}).get("message", "")))
             return CompileResult(outcome=COMPILE_ACCEPTED,
-                                 duration_s=duration)
+                                 duration_s=duration,
+                                 signal=str(data.get("signal", "")))
         return CompileResult(
             outcome=COMPILE_INFRA_FAILURE, duration_s=duration,
             message=str(payload.get("message", ""))

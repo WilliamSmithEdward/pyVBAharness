@@ -168,9 +168,24 @@ class OfficeHost:
         self._cov_set = False
         self._job: KillOnCloseJob | None = None
         self._support_installed = False
-        self._call_signature: tuple[str, str, int] | None = None
+        # Dispatcher entries registered in this session, in the order they
+        # appear in the generated module (insertion-ordered, so the entry
+        # name is the key's position). Accumulating them is what makes a run
+        # that switches target free instead of a module rewrite.
+        self._call_targets: dict[
+            tuple[str, str, int],
+            tuple[str, str, vbasig.ProcedureSignature, int]] = {}
+        self._call_entries: dict[tuple[str, str, int], str] = {}
         self._batch_signature: frozenset | None = None
         self._resolved: dict[str, tuple[str, str, vbasig.ProcedureSignature]] = {}
+        # Declarations parsed per module. Resolving reads a module's whole
+        # source over COM, so resolving 30 targets in one module used to
+        # read and parse it 30 times: 23.8 ms per target, measured
+        # 2026-09-22 on Excel 16 preparing a 30-test suite.
+        self._procs_cache: dict[str, dict[str,
+                                          vbasig.ProcedureSignature]] = {}
+        self._component_map: dict[str, Any] = {}
+        self._components_cache: Any = None
         self._compile_control: Any = None
         # Names this session added to the VBA project. Hosts whose
         # teardown must delete them (Access prompts for unsaved
@@ -345,6 +360,10 @@ class OfficeHost:
         """
         self.document = None
         self._compile_control = None
+        # These hold COM proxies into the host as well, and a reference kept
+        # here would keep the host alive exactly as the Application one does.
+        self._components_cache = None
+        self._component_map = {}
         self.app = None
         gc.collect()
         gc.collect()
@@ -384,15 +403,30 @@ class OfficeHost:
     # ----- VBA project -----------------------------------------------------
 
     def _components(self) -> Any:
-        """The VBComponents collection holding the harness's modules."""
+        """The VBComponents collection holding the harness's modules.
+
+        Held between calls because reaching it is a chain of cross-process
+        COM property reads, and every resolve and every module write walks
+        it. Dropped by _reset_injection_state, which each host runs when the
+        document it hangs off changes.
+        """
+        if self._components_cache is None:
+            self._components_cache = self._components_uncached()
+        return self._components_cache
+
+    def _components_uncached(self) -> Any:
         raise NotImplementedError
 
     def _reset_injection_state(self) -> None:
         self._support_installed = False
-        self._call_signature = None
+        self._call_targets = {}
+        self._call_entries = {}
         self._batch_signature = None
         self._progress_set = False
         self._resolved = {}
+        self._procs_cache = {}
+        self._component_map = {}
+        self._components_cache = None
         self._injected = set()
 
     @_wrap_com("add module")
@@ -405,7 +439,7 @@ class OfficeHost:
         """Create or replace a module. Skips the reserved-name check so the
         harness can inject its own modules."""
         self._require_document()
-        self._resolved = {}  # module change invalidates cached signatures
+        self._invalidate_resolved(name)
         # Changing the VBProject resets VBA module-level state, so anything
         # pushed into the support module (progress path, coverage arrays)
         # is gone and must be re-pushed before the next run. Observed live
@@ -418,15 +452,104 @@ class OfficeHost:
         body = codegen.strip_module_header(source)
         components = self._components()
         existing = self._find_component(components, name)
-        if existing is not None:
-            components.Remove(existing)
-        component = components.Add(component_kind)
-        component.Name = name
-        if body.strip():
-            component.CodeModule.AddFromString(body)
+        component = self._replace_code_in_place(existing, component_kind, body)
+        if component is None:
+            if existing is not None:
+                # The cached component may be the reason the overwrite was
+                # refused (someone deleted the module in the VBE), so look
+                # again from the collection before removing anything.
+                self._component_map = {}
+                existing = self._find_component(components, name)
+            if existing is not None:
+                components.Remove(existing)
+            component = components.Add(component_kind)
+            component.Name = name
+            if body.strip():
+                component.CodeModule.AddFromString(body)
+        elif str(component.Name) != name:
+            component.Name = name
+        self._component_map[name.lower()] = component
         self._injected.add(name)
         self._after_module_write(name)
         return {"name": name, "kind": kind, "lines": body.count("\n") + 1}
+
+    def _invalidate_resolved(self, written: str) -> None:
+        """Drop the caches a write to ``written`` could invalidate.
+
+        Two caches key off a module's contents. The resolved-signature cache
+        used to be cleared on every write, which made the harness pay for
+        its own bookkeeping: a run that switches target rewrites the
+        dispatcher, and that write then forced the next run to re-read and
+        re-parse the target module over COM. A qualified target names the
+        only module that can change its meaning, so writing anything else
+        leaves it alone; a bare target is searched across every component,
+        so any write can change it and it always goes.
+
+        The dispatcher entries must go the same way, and until 1.1.5 they
+        did not go at all. Their key is (module, proc, argument count),
+        which does not record whether the target is a Sub or a Function, so
+        rewriting a module kept the old call shape: measured 2026-09-22 on
+        Excel 16, turning Main from a Sub into a Function returned
+        value=None with outcome=passed instead of the function's 42, and the
+        reverse left the stale entry calling a Sub for its value, which
+        raised a VBA dialog and ended the run modal-blocked.
+        """
+        lowered = written.lower()
+        self._resolved = {
+            key: value for key, value in self._resolved.items()
+            # A qualified target names its module, so only a write to that
+            # module can change what it resolves to. A bare target is
+            # searched across every component, so any write can change it.
+            if "." in key and value[0].lower() != lowered}
+        self._component_map = {}
+        if lowered in {n.lower() for n in codegen.HARNESS_MODULE_NAMES}:
+            self._procs_cache.pop(lowered, None)
+        else:
+            # A write can rename a module, so drop the parsed declarations
+            # wholesale rather than reason about which name they are under.
+            self._procs_cache = {}
+        stale = [key for key, target in self._call_targets.items()
+                 if target[0].lower() == lowered]
+        for key in stale:
+            self._call_targets.pop(key, None)
+            self._call_entries.pop(key, None)
+
+    @staticmethod
+    def _replace_code_in_place(existing: Any, component_kind: int,
+                               body: str) -> Any:
+        """Overwrite an existing component's code, or None to Remove and Add.
+
+        Removing a VBComponent and adding a fresh one is the expensive part
+        of a module write, and it is expensive per write rather than per
+        line: measured 2026-09-22 on Excel 16, a 3-line module cost 64.1 ms
+        and a 60-procedure one 68.1 ms through Remove plus Add. Replacing the
+        code lines of the component already there skips both calls.
+
+        This matters well beyond add_module, because a run whose target
+        differs from the last one rewrites the dispatcher: run_tests loops
+        run_macro over each test, so a 30-test suite paid 30 of these and
+        spent 99% of its wall time here (2.43 s against a 0.03 s floor).
+
+        Falls back to Remove and Add when there is nothing to overwrite or
+        the kind changes, which keeps a class-to-standard swap (and the
+        error a document module raises) behaving exactly as before.
+        """
+        if existing is None:
+            return None
+        try:
+            if int(existing.Type) != component_kind:
+                return None
+            code_module = existing.CodeModule
+            count = int(code_module.CountOfLines)
+            if count:
+                code_module.DeleteLines(1, count)
+            if body.strip():
+                code_module.AddFromString(body)
+            return existing
+        except com_error:
+            # Any refusal here (a component that will not accept line edits)
+            # is not worth diagnosing: Remove and Add is the known-good path.
+            return None
 
     def _after_module_write(self, name: str) -> None:
         """Hook for apps that must register a module beyond the VBE."""
@@ -440,20 +563,34 @@ class OfficeHost:
             return {"name": name, "removed": False}
         components.Remove(component)
         self._injected.discard(name)
+        # Same invalidation a write needs: a dispatcher entry calling into a
+        # module that is now gone would stop the whole module compiling.
+        self._invalidate_resolved(name)
         if name.lower() == codegen.SUPPORT_MODULE_NAME.lower():
             self._support_installed = False
         if name.lower() == codegen.CALL_MODULE_NAME.lower():
-            self._call_signature = None
+            self._call_targets = {}
+            self._call_entries = {}
         return {"name": name, "removed": True}
 
-    @staticmethod
-    def _find_component(components: Any, name: str) -> Any:
+    def _find_component(self, components: Any, name: str) -> Any:
+        """A component by name, over a cached name-to-component map.
+
+        The walk costs a COM property read per component, so resolving
+        several targets used to re-read every name once per target. The map
+        is dropped by _invalidate_resolved, which runs on every write and
+        removal, and a name that misses rebuilds it before giving up, so a
+        component that appeared some other way is still found.
+        """
         wanted = name.lower()
+        component = self._component_map.get(wanted)
+        if component is not None:
+            return component
+        self._component_map = {}
         for index in range(1, int(components.Count) + 1):
-            component = components.Item(index)
-            if str(component.Name).lower() == wanted:
-                return component
-        return None
+            item = components.Item(index)
+            self._component_map[str(item.Name).lower()] = item
+        return self._component_map.get(wanted)
 
     def _module_source(self, component: Any) -> str:
         code_module = component.CodeModule
@@ -490,8 +627,7 @@ class OfficeHost:
                 raise HostError(
                     f"Module {module_name!r} does not exist in this "
                     f"{self.document_noun}'s VBA project.")
-            signature = vbasig.find_procedure(self._module_source(component),
-                                              proc_name)
+            signature = self._module_procs(component).get(proc_name.lower())
             if signature is None:
                 raise HostError(
                     f"{module_name}.{proc_name} is not a callable Sub, "
@@ -504,13 +640,32 @@ class OfficeHost:
             name = str(component.Name)
             if name.lower() in reserved:
                 continue
-            signature = vbasig.find_procedure(self._module_source(component),
-                                              proc_name)
+            signature = self._module_procs(component).get(proc_name.lower())
             if signature is not None:
                 return name, proc_name, signature
         raise HostError(
             f"No module in this {self.document_noun} declares a callable "
             f"{proc_name!r}.")
+
+    def _module_procs(self, component: Any
+                      ) -> dict[str, vbasig.ProcedureSignature]:
+        """Callable declarations in a component, by lowercased name.
+
+        Cached per module because the source has to come over COM in one
+        piece, and resolving several targets in the same module would
+        otherwise fetch and parse it once per target. First declaration of a
+        name wins, which is what find_procedure did.
+        """
+        name = str(component.Name).lower()
+        cached = self._procs_cache.get(name)
+        if cached is not None:
+            return cached
+        table: dict[str, vbasig.ProcedureSignature] = {}
+        for signature in vbasig.list_procedures(
+                self._module_source(component)):
+            table.setdefault(signature.name.lower(), signature)
+        self._procs_cache[name] = table
+        return table
 
     def _ensure_support(self) -> None:
         if self._support_installed:
@@ -576,15 +731,106 @@ class OfficeHost:
 
     def _ensure_dispatcher(self, module: str, proc: str,
                            signature: vbasig.ProcedureSignature,
-                           arg_count: int) -> None:
+                           arg_count: int) -> str:
+        """Entry to call for this target, registering it when it is new.
+
+        Registration rewrites the module, so it costs once per target rather
+        than once per switch between targets. That is the difference between
+        a test suite paying a module write per test and paying one for the
+        whole run: measured 2026-09-22 on Excel 16, a 30-test suite spent
+        99% of its 2.43 s rewriting this module, against a 0.03 s floor for
+        the same 30 runs against an unchanging target.
+        """
         key = (module.lower(), proc.lower(), arg_count)
-        if self._call_signature == key:
-            return
-        self._write_module(
-            codegen.CALL_MODULE_NAME,
-            codegen.call_module_source(module, proc, signature, arg_count),
-            "standard")
-        self._call_signature = key
+        entry = self._call_entries.get(key)
+        if entry is not None:
+            return entry
+        self._call_targets[key] = (module, proc, signature, arg_count)
+        while len(self._call_targets) > codegen.MAX_CALL_ENTRIES:
+            self._call_targets.pop(next(iter(self._call_targets)))
+        self._rewrite_dispatcher()
+        return self._call_entries[key]
+
+    @_wrap_com("prepare run targets")
+    def prepare_targets(self, targets: list[str]) -> dict[str, Any]:
+        """Register several targets in one dispatcher rewrite.
+
+        Registering lazily costs a rewrite per target, so a suite's first
+        pass pays one per test and rewrites a module that grows each time.
+        Doing them together makes that one write: measured 2026-09-22 on
+        Excel 16, a 30-test suite's first pass went from 1.82 s to 0.10 s.
+
+        Targets that do not resolve are left out rather than raising, so a
+        name that is wrong still fails on its own run and reports what is
+        wrong with it, instead of failing the whole suite here. If the batch
+        does not compile the registry is emptied, which puts every target
+        back on the lazy path and keeps one uncallable procedure from taking
+        the others down with it.
+        """
+        self._require_document()
+        self._ensure_support()
+        registered: list[str] = []
+        for target in targets:
+            try:
+                codegen.validate_run_target(target)
+                module, proc, signature = self._resolve_target(target)
+            except (HostError, com_error):
+                continue
+            arg_count = signature.required
+            if arg_count > codegen.MAX_RUN_ARGS:
+                continue
+            key = (module.lower(), proc.lower(), arg_count)
+            if key in self._call_targets:
+                continue
+            self._call_targets[key] = (module, proc, signature, arg_count)
+            registered.append(f"{module}.{proc}")
+        while len(self._call_targets) > codegen.MAX_CALL_ENTRIES:
+            self._call_targets.pop(next(iter(self._call_targets)))
+        if not self._call_targets:
+            return {"prepared": [], "compiled": True}
+        self._rewrite_dispatcher()
+        self._ensure_progress_path()
+        self._ensure_coverage()
+        compiled = self._dispatcher_compiled()
+        if not compiled:
+            self._call_targets = {}
+            self._call_entries = {}
+            registered = []
+        return {"prepared": registered, "compiled": compiled}
+
+    def _rewrite_dispatcher(self) -> None:
+        """Regenerate the dispatcher module from the registered targets."""
+        try:
+            self._write_module(
+                codegen.CALL_MODULE_NAME,
+                codegen.call_module_source(list(self._call_targets.values())),
+                "standard")
+        except Exception:
+            # The module's contents are no longer known, so no entry name
+            # can be trusted. Start the registry over instead of calling
+            # into a module that may not hold what the names say.
+            self._call_targets = {}
+            self._call_entries = {}
+            raise
+        self._call_entries = {
+            key: codegen.call_entry_name(index)
+            for index, key in enumerate(self._call_targets)}
+
+    def _dispatcher_compiled(self) -> bool:
+        """Whether the dispatcher module currently compiles.
+
+        Answered by calling the sentinel entry every build carries. VBA
+        compiles a module before running anything in it, so a sentinel that
+        answers proves the module is sound, and one that does not proves
+        nothing in the module ran.
+        """
+        try:
+            self._invoke_run(
+                self._run_ref(codegen.CALL_MODULE_NAME, codegen.READY_ENTRY),
+                [])
+            return True
+        except com_error:
+            return False
 
     @_wrap_com("run VBA")
     def run(self, target: str, args: list[Any]) -> str:
@@ -606,12 +852,50 @@ class OfficeHost:
                 f"{module}.{proc} takes {signature.arity_text()} "
                 f"argument(s); {len(args)} were supplied.")
         self._ensure_support()
-        self._ensure_dispatcher(module, proc, signature, len(args))
+        key = (module.lower(), proc.lower(), len(args))
+        entry = self._ensure_dispatcher(module, proc, signature, len(args))
         self._ensure_progress_path()
         self._ensure_coverage()
-        return str(self._invoke_run(
-            self._run_ref(codegen.CALL_MODULE_NAME, codegen.RUNNER_ENTRY),
-            args))
+        try:
+            return str(self._invoke_run(
+                self._run_ref(codegen.CALL_MODULE_NAME, entry), args))
+        except com_error:
+            # A target the generated call cannot compile takes every other
+            # entry in the module down with it. Retry it alone, but only
+            # once the sentinel has proved the module did not compile,
+            # because that is what rules out the target having already run
+            # and makes the second attempt safe for a procedure with side
+            # effects.
+            if len(self._call_targets) <= 1 or self._dispatcher_compiled():
+                raise
+            return str(self._invoke_run(
+                self._run_ref(codegen.CALL_MODULE_NAME,
+                              self._isolate_dispatcher(key)), args))
+
+    def _isolate_dispatcher(self, key: tuple[str, str, int]) -> str:
+        """Rebuild the dispatcher around one target, and drop it if it fails.
+
+        Keeps a target the harness cannot call costing only its own run,
+        which is what it cost before entries accumulated. A target that
+        fails even alone is removed from the registry so it cannot break the
+        next accumulation too.
+        """
+        target = self._call_targets.get(key)
+        self._call_targets = {key: target} if target else {}
+        self._rewrite_dispatcher()
+        # The rewrite reset VBA module-level state, so the progress path and
+        # coverage arrays have to go back in before the retry runs.
+        self._ensure_progress_path()
+        self._ensure_coverage()
+        if not self._dispatcher_compiled():
+            self._call_targets = {}
+            self._call_entries = {}
+            raise HostError(
+                f"{key[0]}.{key[1]} cannot be called from the generated "
+                "dispatcher. A Private procedure is the usual reason; the "
+                "harness calls targets directly, so they must be callable "
+                "from another module.")
+        return self._call_entries[key]
 
     @_wrap_com("run VBA (raw)")
     def run_raw(self, target: str, args: list[Any]) -> Any:
@@ -709,16 +993,26 @@ class OfficeHost:
         returns "fired". The caller owns the watch window and the verdict.
         """
         self._require_document()
-        self._set_quietly("Visible", True)
         vbe = self.app.VBE
-        vbe.MainWindow.Visible = True
         self._activate_vbproject(vbe)
         control = self._find_compile_control(vbe)
         if control is None:
             raise HostError(
                 "Could not locate the VBE Compile command (control id 578).")
         if not control.Enabled:
+            # Nothing to compile, so nothing can raise a dialog, so the VBE
+            # never has to be shown. Worth the early return: showing it is
+            # not free and not undoable. Measured 2026-09-22 on Excel 16,
+            # once MainWindow.Visible has been True every later COM call in
+            # that process costs about 7x (0.53 ms -> 3.49 ms), and it stays
+            # that way -- hiding the window again, closing it, and idling
+            # all leave the cost where it is, because the window can be
+            # hidden but the VBE cannot be unloaded. Reading the control is
+            # free: VBProjects and CommandBars cost nothing measurable.
             return "already-compiled"
+        self._set_quietly("Visible", True)
+        vbe.MainWindow.Visible = True
+        self._activate_vbproject(vbe)
         control.Execute()
         return "fired"
 

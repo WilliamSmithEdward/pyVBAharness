@@ -146,9 +146,27 @@ parses the declaration (handling line continuations, comments, Optional,
 ParamArray, Property Get, and Declare) so arity is validated in Python before
 Excel is touched; a mismatch would otherwise become a VBA compile error at
 run time. Arguments are wrapped in parentheses to force ByVal, so a Variant
-from the ParamArray satisfies a typed parameter. The dispatcher is cached by
-(module, proc, argument count) and regenerated only when that changes, which
-is why a repeat run costs 18 ms and a retarget costs 88 ms.
+from the ParamArray satisfies a typed parameter.
+
+The dispatcher holds one entry per target the session has run, keyed by
+(module, proc, argument count), and the module is rewritten only when a
+target is new. Switching between targets already registered therefore costs
+a warm run rather than a module write: 0.6 ms against the 88 ms a retarget
+used to cost. `prepare_targets` registers a known set in one write, which is
+how `run_tests` avoids paying one per test.
+
+Because that key says nothing about whether the target is a Sub or a
+Function, an entry is dropped as soon as its module is written or removed.
+Keeping one across a rewrite is how a target promoted from Sub to Function
+silently returned nothing.
+
+Entries share a module, so one whose generated call will not compile would
+stop the others compiling. Every build carries a `PyVbaReady` sentinel to
+tell that apart from a target that failed on its own account: VBA compiles a
+module before running anything in it, so a sentinel that answers proves the
+module is sound, and one that does not proves nothing in the module ran,
+which is what makes retrying the call alone safe for a procedure with side
+effects.
 
 ### Large writes wedge Excel after a macro has run
 
@@ -374,7 +392,10 @@ far less serial work per task. Startup is concurrent (0.8 s for 2 members,
 
 Module injection uses `Workbook.VBProject.VBComponents` (`AddFromString`),
 which requires the Excel option "Trust access to the VBA project object
-model". This is the documented requirement of the harness. The alternative
+model". A module that already exists has its code lines replaced rather than
+the component removed and re-added, because the remove-and-add pair was the
+cost of a write: 64.1 ms against 21.8 ms in place, and near enough the same
+either way for a module sixty procedures long. This is the documented requirement of the harness. The alternative
 file-staging path (writing modules into a copy with pyOpenVBA before open)
 is deliberately out of scope for v1: it trades the trust setting for slower
 per-change reopen cycles, and this project assumes the setting is on.
@@ -387,6 +408,14 @@ The session makes Excel visible for the duration of a compile check and
 restores hidden mode afterward. Compile outcomes are
 `accepted | rejected (dialog text) | infrastructure-failure`; a timeout is
 infrastructure, never a verdict.
+
+The control's `Enabled` state is read before anything is shown, because the
+VBE disables `Compile` exactly when the project is already compiled. Nothing
+to compile means nothing can raise a dialog, so the check answers
+`already-compiled` without showing the VBE. That is worth the early return:
+showing the VBE costs every later COM call in that process about 7x and
+cannot be undone, so a session that runs a compile check carries the cost
+for the rest of its life. Compile last, or recycle afterwards.
 
 ## Office configuration
 
@@ -433,8 +462,8 @@ src/pyvbaharness/
   worker/__main__.py  worker entry point, command loop, progress tail
   worker/hosts/       one COM adapter per app, over a shared base
   worker/watcher.py   ctypes window scanner + dismissal executor
-tests/unit            pure logic, no Office required (238 tests)
-tests/live            real Office, opt-in via -m live (123 tests)
+tests/unit            pure logic, no Office required (241 tests)
+tests/live            real Office, opt-in via -m live (129 tests)
 benchmarks/           per-run, batch, and pool scaling measurements
 ```
 

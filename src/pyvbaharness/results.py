@@ -155,6 +155,11 @@ class CompileResult:
     duration_s: float
     dialog: DialogRecord | None = None
     message: str = ""
+    # How an accepted verdict was reached: "already-compiled" when the VBE
+    # had nothing to compile (no compile fired, and the VBE was never
+    # shown), "control-disabled" when a fired compile finished cleanly, and
+    # "watch-window-elapsed" when the verdict rests on no dialog appearing.
+    signal: str = ""
 
     @property
     def ok(self) -> bool:

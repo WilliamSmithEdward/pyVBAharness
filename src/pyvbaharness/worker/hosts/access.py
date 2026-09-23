@@ -194,7 +194,7 @@ class AccessHost(OfficeHost):
 
     # ----- VBA project -----------------------------------------------------
 
-    def _components(self) -> Any:
+    def _components_uncached(self) -> Any:
         """Access keeps VBA in the application-wide project, not on a
         document object."""
         return self.app.VBE.ActiveVBProject.VBComponents

@@ -361,6 +361,29 @@ End Function
         # a clean compile must not wait out the whole watch window.
         assert result.duration_s < 6.0
 
+    def test_repeat_check_reports_already_compiled(self, session):
+        """A check with nothing to compile must not show the VBE.
+
+        Showing it is not free and not undoable: measured 2026-09-22 on
+        Excel 16, once the VBE main window has been shown every later COM
+        call in that process costs about 7x (0.53 ms -> 3.49 ms), and
+        hiding it again does not give that back. The already-compiled
+        signal is the one path that reaches a verdict without it.
+        """
+        session.new_workbook()
+        session.add_module("Twice", """
+Option Explicit
+Public Function Fine() As Long
+    Fine = 1
+End Function
+""")
+        first = session.compile_project(watch_seconds=8.0)
+        assert first.outcome == COMPILE_ACCEPTED
+
+        second = session.compile_project(watch_seconds=8.0)
+        assert second.outcome == COMPILE_ACCEPTED
+        assert second.signal == "already-compiled"
+
     def test_harness_calls_compile_with_support_module(self, session):
         session.new_workbook()
         session.add_module("UsesLog", """

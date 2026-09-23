@@ -4,8 +4,11 @@ Two modules are injected:
 
 - ``PyVbaHarnessRunner`` (static): output collection and JSON serialization.
   Added once per workbook.
-- ``PyVbaHarnessCall`` (generated per target): ``PyVbaRun`` wraps one direct
-  call to the target procedure in ``On Error`` and returns a JSON string.
+- ``PyVbaHarnessCall`` (generated): one ``PyVbaRun<n>`` entry per target the
+  session has run, each wrapping one direct call to its target procedure in
+  ``On Error`` and returning a JSON string. Entries accumulate, so switching
+  back to a target already registered costs nothing; the module is rewritten
+  only when a target is new to the session.
 
 The direct call is the accuracy core. An error raised inside a procedure
 invoked through ``Application.Run`` does not unwind into the calling VBA
@@ -17,7 +20,9 @@ call unwinds normally and is trapped. Verified live on 2026-07-25: the same
 
 Because the call is direct, its shape must match the callee (Sub versus
 Function, exact argument count), which is why vbasig parses the declaration
-first and the dispatcher is regenerated when the target or arity changes.
+first and a registered entry is discarded as soon as its module is written
+again. Keeping an entry across a rewrite of its own module is how a target
+that changed from a Sub into a Function silently lost its return value.
 
 Other contracts:
 
@@ -47,6 +52,11 @@ BATCH_SHEET_NAME = "PyVbaHarnessBatch"
 BATCH_ENTRY = "PyVbaRunBatch"
 RUNNER_ENTRY = "PyVbaRun"
 MAX_RUN_ARGS = 10
+# Dispatcher entries kept before the oldest is evicted. Each costs about 20
+# lines of generated VBA, and a rewrite stays cheap at this size: measured
+# 2026-09-22, writing a 3-line module took 21.8 ms and a 60-procedure one
+# 26.3 ms.
+MAX_CALL_ENTRIES = 64
 MAX_BATCH_CALLS = 50000
 MAX_BATCH_ARG_CHARS = 30000
 
@@ -295,20 +305,27 @@ def call_expression(module: str, proc: str, signature: ProcedureSignature,
     return [f"    Call {qualified}{call_args}", "    resultValue = Empty"]
 
 
-def call_module_source(module: str, proc: str, signature: ProcedureSignature,
-                       arg_count: int) -> str:
-    """Generated per-target dispatcher module."""
+def call_entry_name(index: int) -> str:
+    """Name of the dispatcher entry for the target registered at ``index``."""
+    return f"{RUNNER_ENTRY}{index}"
+
+
+def call_entry_source(entry: str, module: str, proc: str,
+                      signature: ProcedureSignature, arg_count: int) -> str:
+    """One dispatcher entry: a direct call wrapped in ``On Error``.
+
+    ``Caught`` repeats across entries on purpose; VBA line labels are scoped
+    to their procedure.
+    """
     body = "\n".join(call_expression(module, proc, signature, arg_count))
     parameters = runner_parameters(arg_count)
-    return f'''Option Explicit
-
-Public Function {RUNNER_ENTRY}({parameters}) As String
+    return f'''Public Function {entry}({parameters}) As String
     Dim resultValue As Variant
     PyVbaResetOutput
     On Error GoTo Caught
 {body}
     On Error GoTo 0
-    {RUNNER_ENTRY} = "{{""outcome"":""passed"",""value"":" & _
+    {entry} = "{{""outcome"":""passed"",""value"":" & _
         PyVbaJsonValue(resultValue) & ",""output"":" & PyVbaOutputJson() & "}}"
     Exit Function
 Caught:
@@ -321,10 +338,38 @@ Caught:
     errDescription = Err.Description
     errLine = PyVbaLastErl()
     On Error GoTo 0
-    {RUNNER_ENTRY} = PyVbaFailureJson(errNumber, errSource, _
+    {entry} = PyVbaFailureJson(errNumber, errSource, _
         errDescription, errLine)
 End Function
 '''
+
+
+READY_ENTRY = "PyVbaReady"
+
+_READY_SOURCE = f'''Public Function {READY_ENTRY}() As Long
+    {READY_ENTRY} = 1
+End Function
+'''
+
+
+def call_module_source(
+        targets: list[tuple[str, str, ProcedureSignature, int]]) -> str:
+    """Generated dispatcher module: one entry per registered target.
+
+    Every build carries ``PyVbaReady``, which answers one question that
+    cannot be answered from a failed call alone: did the module compile?
+    VBA compiles a module before running any procedure in it, so if this
+    trivial entry answers, the module is sound and a failed run failed on
+    its own account; if it does not, nothing in the module ran and the call
+    can be retried without repeating the target's side effects.
+    """
+    entries = [
+        call_entry_source(call_entry_name(index), module, proc, signature,
+                          arg_count)
+        for index, (module, proc, signature, arg_count) in enumerate(targets)
+    ]
+    return ("Option Explicit\n\n" + _READY_SOURCE + "\n"
+            + "\n".join(entries))
 
 
 def support_module_source() -> str:

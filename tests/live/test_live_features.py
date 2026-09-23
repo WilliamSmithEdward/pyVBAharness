@@ -539,3 +539,161 @@ End Function
             session, source, "SafeAbs",
             check=lambda args, value: value == abs(args[0]),
             max_examples=40)
+
+
+STATEFUL_SOURCE = """
+Private mCounter As Long
+
+Public Sub Bump()
+    mCounter = mCounter + 1
+End Sub
+
+Public Function Counter() As Long
+    Counter = mCounter
+End Function
+"""
+
+
+class TestDispatcherEntries:
+    """The generated dispatcher holds an entry per target it has run.
+
+    Switching target used to rewrite the module every time, which cost a
+    write per switch and reset VBA module-level state with it.
+    """
+
+    def test_switching_between_targets_does_not_reset_vba_state(self,
+                                                                session):
+        """Module-level state is the oracle here, not a stopwatch.
+
+        Writing any module resets it, so state that survives a switch
+        between two targets proves the dispatcher was not rewritten. Before
+        entries accumulated, the second Counter call came back 0.
+        """
+        session.new_workbook()
+        session.add_module("Stateful", STATEFUL_SOURCE)
+
+        # Register both entries first: the registering run rewrites the
+        # module, which is exactly what resets the state being measured.
+        session.run_macro("Stateful.Bump")
+        session.run_macro("Stateful.Counter")
+
+        session.run_macro("Stateful.Bump")
+        session.run_macro("Stateful.Bump")
+        assert session.run_macro("Stateful.Counter").value == 2
+
+    def test_target_that_changes_shape_is_not_called_the_old_way(self,
+                                                                 session):
+        """The dispatcher entry keys on (module, proc, argument count).
+
+        None of that records whether the target is a Sub or a Function, so
+        an entry kept across a rewrite of its own module calls the target
+        the old way. Measured 2026-09-22 before the fix: Main returned
+        value=None with outcome=passed instead of 42, and changing back
+        raised a VBA dialog and ended the run modal-blocked.
+        """
+        session.new_workbook()
+        session.add_module("Shape", """
+Public Sub Main()
+    Dim x As Long
+    x = 1
+End Sub
+""")
+        assert session.run_macro("Shape.Main").outcome == PASSED
+
+        session.add_module("Shape", """
+Public Function Main() As Long
+    Main = 42
+End Function
+""")
+        promoted = session.run_macro("Shape.Main")
+        assert promoted.outcome == PASSED
+        assert promoted.value == 42
+
+        session.add_module("Shape", """
+Public Sub Main()
+    Dim x As Long
+    x = 1
+End Sub
+""")
+        demoted = session.run_macro("Shape.Main")
+        assert demoted.outcome == PASSED
+        assert demoted.value is None
+
+    def test_removing_a_module_drops_its_entries(self, session):
+        session.new_workbook()
+        session.add_module("Gone", """
+Public Sub Vanishing()
+    Dim x As Long
+    x = 1
+End Sub
+""")
+        assert session.run_macro("Gone.Vanishing").outcome == PASSED
+        session.remove_module("Gone")
+
+        # An entry calling into a module that no longer exists would stop
+        # the whole dispatcher compiling, taking every other target down.
+        session.add_module("Survivor", """
+Public Function Alive() As Long
+    Alive = 7
+End Function
+""")
+        assert session.run_macro("Survivor.Alive").value == 7
+
+    def test_one_uncallable_target_costs_only_its_own_run(self, session):
+        """Entries share a module, so one that will not compile could take
+        every other entry with it. A Private Sub is the realistic way in:
+        discovery matches it, and a direct call cannot reach it."""
+        session.new_workbook()
+        results = session.run_tests("""
+Public Sub TestOne()
+    Dim x As Long
+    x = 1
+End Sub
+
+Private Sub TestPrivate()
+    Dim x As Long
+    x = 2
+End Sub
+
+Public Sub TestThree()
+    Dim x As Long
+    x = 3
+End Sub
+
+Public Function TestFour() As Long
+    TestFour = 4
+End Function
+""", module="Poisoned", prefix="Test")
+
+        by_name = {case.name: case.result for case in results}
+        assert by_name["TestOne"].outcome == PASSED
+        assert by_name["TestThree"].outcome == PASSED
+        assert by_name["TestFour"].value == 4
+        assert not session.is_dead
+
+    def test_prepare_targets_is_only_an_optimization(self, session):
+        session.new_workbook()
+        session.add_module("Prepared", """
+Public Function First() As Long
+    First = 1
+End Function
+
+Public Function Second() As Long
+    Second = 2
+End Function
+""")
+        registered = session.prepare_targets(
+            ["Prepared.First", "Prepared.Second", "Prepared.NotThere"])
+        assert sorted(registered) == ["Prepared.First", "Prepared.Second"]
+
+        assert session.run_macro("Prepared.First").value == 1
+        assert session.run_macro("Prepared.Second").value == 2
+        # A target nobody prepared still runs the ordinary way.
+        session.add_module("Late", """
+Public Function Third() As Long
+    Third = 3
+End Function
+""")
+        assert session.run_macro("Late.Third").value == 3
+        # And one that does not exist still reports its own failure.
+        assert session.run_macro("Prepared.NotThere").outcome != PASSED

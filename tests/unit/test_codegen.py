@@ -122,7 +122,7 @@ class TestSupportModule:
         assert "ByVal errorLine As Long" in source
         assert '",""line"":"' in source
         dispatcher = codegen.call_module_source(
-            "M", "P", ProcedureSignature("P", "sub", 0, 0, False), 0)
+            [("M", "P", ProcedureSignature("P", "sub", 0, 0, False), 0)])
         assert "errLine = PyVbaLastErl()" in dispatcher
 
 
@@ -148,13 +148,42 @@ class TestCallModule:
 
     def test_module_source_wraps_call_in_error_handler(self):
         signature = ProcedureSignature("Boom", KIND_SUB, 0, 0, False)
-        source = codegen.call_module_source("User", "Boom", signature, 0)
-        assert "Public Function PyVbaRun" in source
+        source = codegen.call_module_source(
+            [("User", "Boom", signature, 0)])
+        assert "Public Function PyVbaRun0" in source
         assert "On Error GoTo Caught" in source
         assert "Call User.Boom" in source
         # The dispatcher must not route through Application.Run: that would
         # break in-VBA error trapping.
         assert "Application.Run" not in source
+        # One entry plus the sentinel every build carries.
+        assert source.count("End Function") == 2
+        assert f"Public Function {codegen.READY_ENTRY}()" in source
+
+    def test_each_target_gets_its_own_entry(self):
+        sub = ProcedureSignature("Go", KIND_SUB, 0, 0, False)
+        function = ProcedureSignature("Add", KIND_FUNCTION, 2, 0, False)
+        source = codegen.call_module_source([
+            ("ModA", "Go", sub, 0),
+            ("ModB", "Add", function, 2),
+        ])
+        assert "Public Function PyVbaRun0() As String" in source
+        assert ("Public Function PyVbaRun1(ByVal pyVbaArg0 As Variant, "
+                "ByVal pyVbaArg1 As Variant) As String") in source
+        assert "Call ModA.Go" in source
+        assert "resultValue = ModB.Add((pyVbaArg0), (pyVbaArg1))" in source
+        # Each entry carries its own handler, and the label repeats because
+        # VBA scopes line labels to their procedure.
+        assert source.count("On Error GoTo Caught") == 2
+        assert source.count("Caught:") == 2
+
+    def test_entry_names_follow_registration_order(self):
+        assert codegen.call_entry_name(0) == "PyVbaRun0"
+        assert codegen.call_entry_name(7) == "PyVbaRun7"
+
+    def test_sentinel_is_present_even_with_no_targets(self):
+        source = codegen.call_module_source([])
+        assert f"Public Function {codegen.READY_ENTRY}()" in source
         assert source.count("End Function") == 1
 
 

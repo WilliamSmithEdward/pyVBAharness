@@ -116,7 +116,7 @@ class WordHost(OfficeHost):
 
     # ----- VBA project -----------------------------------------------------
 
-    def _components(self) -> Any:
+    def _components_uncached(self) -> Any:
         return self.document.VBProject.VBComponents
 
     def _activate_vbproject(self, vbe: Any) -> None:
