@@ -290,6 +290,19 @@ class OwnedProcessManifest:
             pass
 
 
+def _worker_still_running(data: dict) -> bool:
+    """True when the session that wrote this manifest is still alive.
+
+    Identity is pid plus creation time, so a reused pid does not keep a dead
+    session's host alive forever.
+    """
+    record = data.get("worker")
+    if not isinstance(record, dict):
+        return False
+    return pid_matches(int(record.get("pid", 0) or 0),
+                       record.get("creation"))
+
+
 def sweep_stale_manifests(directory: Path | None = None,
                           stale_after_s: float = STALE_AFTER_S) -> list[str]:
     """Kill exact-match orphans from manifests older than the threshold.
@@ -309,6 +322,15 @@ def sweep_stale_manifests(directory: Path | None = None,
         except (OSError, ValueError):
             continue
         if now - float(data.get("written_at", 0)) < stale_after_s:
+            continue
+        # A manifest goes stale on the clock, not on death. A session that
+        # has been running for longer than the threshold is still live, and
+        # its pid and creation time still match, so the age test on its own
+        # kills exactly the processes it exists to protect: measured
+        # 2026-09-22, a live recorded process was killed by an unrelated
+        # session starting up. The recorded worker is the liveness signal,
+        # because an orphan is precisely a host whose worker has gone.
+        if _worker_still_running(data):
             continue
         for role in ("app", "excel", "worker"):
             record = data.get(role)

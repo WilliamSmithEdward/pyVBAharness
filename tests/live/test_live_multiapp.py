@@ -109,7 +109,10 @@ def _make_database(path) -> None:
 @pytest.fixture(scope="module", params=sorted(SESSION_CLASSES))
 def app_session(request):
     """One module-scoped session per application."""
-    config = HarnessConfig(default_timeout_s=60.0, auto_recycle=True)
+    # lock_wait_s: this machine may be running another session, so
+    # queue for the machine-wide lock rather than erroring out.
+    config = HarnessConfig(default_timeout_s=60.0,
+                           auto_recycle=True, lock_wait_s=300.0)
     with SESSION_CLASSES[request.param](config) as live:
         yield live
 
@@ -194,7 +197,7 @@ class TestOwnership:
 
     @pytest.mark.parametrize("app", MULTI_INSTANCE_APPS)
     def test_instance_dies_with_the_session(self, app):
-        session = SESSION_CLASSES[app]()
+        session = SESSION_CLASSES[app](HarnessConfig(exclusive=False))
         try:
             session.run_vba(BASIC_SOURCE, proc="Main")
             pid = session.app_pid
@@ -207,8 +210,8 @@ class TestOwnership:
 
     @pytest.mark.parametrize("app", MULTI_INSTANCE_APPS)
     def test_two_sessions_never_share_an_instance(self, app):
-        first = SESSION_CLASSES[app]()
-        second = SESSION_CLASSES[app]()
+        first = SESSION_CLASSES[app](HarnessConfig(exclusive=False))
+        second = SESSION_CLASSES[app](HarnessConfig(exclusive=False))
         try:
             assert first.app_pid > 0 and second.app_pid > 0
             assert first.app_pid != second.app_pid
@@ -224,7 +227,7 @@ class TestOwnership:
 
     @pytest.mark.parametrize("app", MULTI_INSTANCE_APPS)
     def test_trace_oracle_is_clean(self, app):
-        session = SESSION_CLASSES[app]()
+        session = SESSION_CLASSES[app](HarnessConfig(exclusive=False))
         session.run_vba(BASIC_SOURCE, proc="Main")
         session.close()
         assert session.oracle_issues == [], [
@@ -264,18 +267,18 @@ class TestPowerPointSingleInstance:
 class TestWordSpecifics:
     def test_save_and_reopen_runs_injected_code(self, tmp_path):
         target = tmp_path / "harness.docm"
-        with WordSession() as session:
+        with WordSession(HarnessConfig(exclusive=False)) as session:
             session.run_vba(BASIC_SOURCE, proc="Main")
             session.save_as(target)
         assert target.exists()
-        with WordSession() as session:
+        with WordSession(HarnessConfig(exclusive=False)) as session:
             session.open_document(target, read_only=False)
             result = session.run_macro("PyVbaUserCode.AddNums", 1, 2)
             assert result.outcome == PASSED, result.message
             assert result.value == 3
 
     def test_save_as_rejects_a_macro_free_format(self, tmp_path):
-        with WordSession() as session:
+        with WordSession(HarnessConfig(exclusive=False)) as session:
             session.run_vba(BASIC_SOURCE, proc="Main")
             with pytest.raises(HarnessError, match="docm"):
                 session.save_as(tmp_path / "dropped.docx")
@@ -283,7 +286,7 @@ class TestWordSpecifics:
 
 class TestAccessSpecifics:
     def test_new_document_creates_a_scratch_database(self):
-        with AccessSession() as session:
+        with AccessSession(HarnessConfig(exclusive=False)) as session:
             info = session.new_document()
             assert info["path"].endswith(".accdb")
             assert session.run_vba(BASIC_SOURCE,
@@ -292,14 +295,14 @@ class TestAccessSpecifics:
     def test_open_refuses_read_only(self, tmp_path):
         """Injecting into Access writes the file immediately, so a
         read_only=True request must be refused, not silently honoured."""
-        with AccessSession() as session:
+        with AccessSession(HarnessConfig(exclusive=False)) as session:
             session.new_document()
             with pytest.raises(HarnessError, match="read_only=False"):
                 session.open_document(tmp_path / "nothing.accdb",
                                       read_only=True)
 
     def test_save_as_is_refused_with_an_explanation(self):
-        with AccessSession() as session:
+        with AccessSession(HarnessConfig(exclusive=False)) as session:
             session.new_document()
             with pytest.raises(HarnessError, match="continuously"):
                 session.save_as("ignored.accdb")
@@ -308,7 +311,7 @@ class TestAccessSpecifics:
         """The 2026-08-18 wedge: an unsaved VBE module makes Access raise a
         modal 'Save As / Module Name' prompt at close, which blocked Quit.
         Teardown removes injected modules first, so it cannot appear."""
-        session = AccessSession()
+        session = AccessSession(HarnessConfig(exclusive=False))
         session.run_vba(BASIC_SOURCE, proc="Main")
         pid = session.app_pid
         session.close()
@@ -335,7 +338,7 @@ End Sub
         """A module the harness did not inject still has to be discarded in
         a scratch database, or Access raises Save As and blocks Quit. The
         harness created this database, so it owns every component in it."""
-        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0))
+        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0, exclusive=False))
         assert session.run_vba(self.STRAY,
                                proc="MakeStray").outcome == PASSED
         pid = session.app_pid
@@ -358,7 +361,7 @@ End Sub
         _make_database(target)
         assert target.exists()
 
-        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0))
+        session = AccessSession(HarnessConfig(cleanup_grace_s=5.0, exclusive=False))
         pid = session.app_pid
         session.open_document(target, read_only=False)
         assert session.run_vba(self.STRAY,
@@ -442,7 +445,7 @@ class TestTeardownPrompts:
 
     @pytest.mark.parametrize("app", MULTI_INSTANCE_APPS)
     def test_unsaved_changes_do_not_block_teardown(self, app):
-        session = SESSION_CLASSES[app]()
+        session = SESSION_CLASSES[app](HarnessConfig(exclusive=False))
         # Dirty the document as well as the VBA project, so both of the
         # "do you want to save?" paths are live at close.
         session.run_vba(BASIC_SOURCE, proc="Main")

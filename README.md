@@ -387,7 +387,7 @@ with SessionPool(4) as pool:
 ```
 
 Throughput on a 16-core machine with 120 ms tasks: 1.9x at two members, 3.6x
-at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.3.json`). Each
+at four, 4.8x at six (`benchmarks/output/pool-baseline-1.1.4.json`). Each
 member uses 150 to 300 MB of RAM. Compile checks remain serialized
 machine-wide inside a pool because they drive the visible VBE, which is a
 shared surface; hidden runs and range IO do not interfere with each other.
@@ -521,7 +521,7 @@ workbook. Workbook-qualified targets are rejected before any COM call.
 ## Performance
 
 Measured on Excel 365 x64 with Python 3.14
-(`benchmarks/output/baseline-1.1.3.json`):
+(`benchmarks/output/baseline-1.1.4.json`):
 
 | Operation | Median |
 | --- | --- |
@@ -549,7 +549,7 @@ dispatcher, which accounts for the 77 ms figure.
 ## Development
 
 ```bash
-python -m pytest tests/unit                          # 219 tests, no Office
+python -m pytest tests/unit                          # 238 tests, no Office
 python -m pytest tests/live -m live -o addopts=""    # 123 tests, real Office
 python benchmarks/run_benchmarks.py
 python benchmarks/run_pool_benchmarks.py

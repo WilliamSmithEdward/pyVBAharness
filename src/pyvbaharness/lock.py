@@ -25,8 +25,27 @@ next waiter with WAIT_ABANDONED, which we treat as acquired.
 from __future__ import annotations
 
 import ctypes
+import threading
 
 from .results import SessionLockHeld
+
+# One lock per mutex name, covering the contention the kernel mutex cannot
+# see. A Windows mutex is owned by a thread and is recursive, so a second
+# wait on the same thread returns immediately: without this, two exclusive
+# sessions built in one thread both believed they held the session lock and
+# neither was told (measured 2026-09-22).
+#
+# These are threading.Lock rather than RLock on purpose. They must not be
+# reentrant, which is the bug being fixed, and they can be released by a
+# thread other than the one that took them, which a session built on one
+# thread and closed on another relies on.
+_name_locks: dict[str, threading.Lock] = {}
+_registry_guard = threading.Lock()
+
+
+def _local_lock(name: str) -> threading.Lock:
+    with _registry_guard:
+        return _name_locks.setdefault(name, threading.Lock())
 
 SESSION_MUTEX_NAME = "Global\\pyvbaharness-excel-session"
 COMPILE_MUTEX_NAME = "Global\\pyvbaharness-compile-check"
@@ -57,8 +76,24 @@ class SessionLock:
         self.name = name
         self.purpose = purpose
         self._handle = None
+        self._local: threading.Lock | None = None
 
     def acquire(self) -> None:
+        # Waits, rather than refusing outright: a compile check inside a
+        # pool is serialized by this lock and is expected to queue, not to
+        # fail because a sibling got there first.
+        self._local = _local_lock(self.name)
+        if not self._local.acquire(timeout=max(self.timeout_s, 0.0)):
+            self._local = None
+            raise SessionLockHeld(self._busy_message())
+        try:
+            self._acquire_kernel_mutex()
+        except BaseException:
+            self._local.release()
+            self._local = None
+            raise
+
+    def _acquire_kernel_mutex(self) -> None:
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.CreateMutexW(None, False, self.name)
         if not handle:
@@ -70,28 +105,37 @@ class SessionLock:
             self._handle = handle
             return
         kernel32.CloseHandle(handle)
+        raise SessionLockHeld(self._busy_message())
+
+    def _busy_message(self) -> str:
         if self.purpose == "create":
-            raise SessionLockHeld(
-                "Timed out waiting to create an Office instance. Another "
-                "session has been starting one for too long; check for a "
-                "stuck Office process.")
+            return ("Timed out waiting to create an Office instance. Another "
+                    "session has been starting one for too long; check for a "
+                    "stuck Office process.")
         if self.purpose == "compile":
-            raise SessionLockHeld(
-                "Another compile check is still running. Compile checks are "
-                "serialized machine-wide because they drive the visible VBE.")
-        raise SessionLockHeld(
-            "Another pyvbaharness session is running on this machine for "
-            "this application. Office automation is sequential by contract; "
-            "wait for it to finish, use SessionPool for parallel work, or "
-            "pass exclusive=False to opt out.")
+            return ("Another compile check is still running. Compile checks "
+                    "are serialized machine-wide because they drive the "
+                    "visible VBE.")
+        return ("Another pyvbaharness session is running for this "
+                "application. Office automation is sequential by contract; "
+                "wait for it to finish, use SessionPool for parallel work, "
+                "or pass exclusive=False to opt out.")
 
     def release(self) -> None:
         if self._handle is None:
             return
         kernel32 = ctypes.windll.kernel32
         kernel32.ReleaseMutex(self._handle)
+        # Closing the handle matters as much as releasing it. A mutex is
+        # owned by the thread that waited on it, so a release from any other
+        # thread fails, and a session built on one thread and closed on
+        # another is an ordinary shape; dropping the last handle destroys
+        # the object either way.
         kernel32.CloseHandle(self._handle)
         self._handle = None
+        if self._local is not None:
+            self._local.release()
+            self._local = None
 
     def __enter__(self) -> "SessionLock":
         self.acquire()

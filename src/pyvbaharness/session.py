@@ -516,7 +516,19 @@ class OfficeSession:
                 "at": time.time(),
             })
 
-    def _stderr_summary(self) -> str:
+    def _stderr_summary(self, settle_s: float = 1.0) -> str:
+        """The worker's last stderr lines, after letting the reader catch up.
+
+        The exit notice and the stderr it explains arrive on two different
+        threads, and the exit almost always wins: summarising immediately
+        reported "(no stderr)" for a worker that had written a perfectly
+        good reason, which is worse than useless when the failure is
+        intermittent. Waiting for the reader to finish costs nothing on a
+        path that has already failed.
+        """
+        for reader in self._readers:
+            if reader.name == "pyvba-stderr":
+                reader.join(timeout=settle_s)
         return "\n".join(list(self._stderr_tail)[-10:]) or "(no stderr)"
 
     def _close_pipes(self) -> None:

@@ -31,8 +31,11 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def session():
+    # lock_wait_s: this machine may be running another session, so
+    # queue for the machine-wide lock rather than erroring out.
     with ExcelSession(HarnessConfig(default_timeout_s=30.0,
-                                    auto_recycle=True)) as live:
+                                    auto_recycle=True,
+                                    lock_wait_s=300.0)) as live:
         yield live
 
 

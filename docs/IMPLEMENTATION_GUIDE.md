@@ -362,6 +362,65 @@ kill, because a host can be terminated by several routes: the kill, the
 kill-on-close job after an abandoned release, or a crash. Enumerating them is
 how one gets missed, and a scoped sweep with nothing to match is a no-op.
 
+### 3.22 A Windows mutex is recursive, so it cannot enforce exclusivity alone
+
+`SessionLock` wraps a named kernel mutex, which is owned by the thread that
+waited on it and is reentrant for that thread. Measured 2026-09-22: two
+exclusive sessions built on one thread both acquired the session mutex, and
+neither was told, so the documented "one session at a time" guarantee was
+silently void inside a single process.
+
+`lock.py` now holds a `threading.Lock` per mutex name underneath the kernel
+one. It waits rather than refusing, because a compile check inside a pool is
+serialized by this lock and is expected to queue: making contention an error
+would fail a sibling's compile instead of ordering it. It is a `Lock` and not
+an `RLock` for the same reason the bug existed, and because a session built
+on one thread and closed on another has to be able to release it.
+
+Closing the handle in `release` is load-bearing beyond tidiness. A release
+from a thread other than the owner fails, and dropping the last handle is
+what destroys the object in that case.
+
+### 3.23 The stale-manifest sweep needs a liveness signal, not a clock
+
+`sweep_stale_manifests` kills recorded processes for any manifest older than
+`STALE_AFTER_S`, matched on pid plus creation time. A manifest goes stale on
+the clock rather than on death, so a session that had been running for longer
+than the threshold still matched, and the sweep killed exactly the process it
+exists to protect: measured 2026-09-22, a live, correctly recorded host was
+terminated by an unrelated session starting up. The harness is built for long
+VBA suites, so half an hour is not a long session.
+
+The sweep now skips any manifest whose recorded worker is still alive, which
+is the precise definition of "not an orphan": an orphaned host is one whose
+worker has gone. A manifest with no worker recorded cannot prove liveness and
+stays sweepable.
+
+### 3.24 Killing Office does not trigger safe mode
+
+Worth knowing before adding machinery against it. Three shapes were tried on
+2026-09-22, all with `taskkill /F`, which is how the harness ends a host:
+
+- six kills during startup at increasing delays,
+- twelve consecutive kills at 0.35 s with no clean start in between,
+- six kills of a fully loaded Excel, add-ins included, which is what a
+  timeout actually does.
+
+None produced a safe-mode prompt, and none left anything in `DisabledItems`
+or `CrashingAddinList`. A kill inside roughly the first second of startup
+writes transient values under `Resiliency\StartupItems`, and Excel clears
+them on its next successful start; they did not accumulate across twelve
+consecutive attempts.
+
+The reason is that Office decides on safe mode from its own fault handling,
+an unhandled exception it catches and reports, and an external
+`TerminateProcess` bypasses that entirely. The only user-visible artifact a
+kill leaves is the `DocumentRecovery` entry in 3.21, which is cleaned up.
+
+So there is deliberately no mitigation here. Adding a sweep for
+`StartupItems` would be complexity against a condition that could not be made
+to persist.
+
 ## 4. Invariants
 
 These are the guarantees the harness sells. Changing one is a contract

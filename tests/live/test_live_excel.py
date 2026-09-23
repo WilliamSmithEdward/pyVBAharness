@@ -33,7 +33,10 @@ pytestmark = pytest.mark.live
 
 @pytest.fixture(scope="module")
 def session():
-    config = HarnessConfig(default_timeout_s=30.0, auto_recycle=True)
+    # lock_wait_s: this machine may be running another session, so
+    # queue for the machine-wide lock rather than erroring out.
+    config = HarnessConfig(default_timeout_s=30.0,
+                           auto_recycle=True, lock_wait_s=300.0)
     with ExcelSession(config) as live:
         yield live
 
@@ -456,7 +459,9 @@ class TestOwnership:
 
 class TestTeardownHygiene:
     def test_excel_process_dies_with_session(self):
-        config = HarnessConfig(auto_recycle=False)
+        # exclusive=False: the module-scoped session already holds the
+        # machine-wide lock for this app.
+        config = HarnessConfig(auto_recycle=False, exclusive=False)
         with ExcelSession(config) as short:
             pid = short.excel_pid
             assert pid > 0
