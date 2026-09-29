@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12.14"
+          python-version: "3.12.10"  # newest 3.12 with a Windows build; see ci.yml's matrix note
 
       - name: Install
         # build and twine from .github/release/requirements.txt; the test
