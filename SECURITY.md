@@ -66,8 +66,9 @@ Every push, every pull request, daily, and every release:
   [YARA Forge](https://github.com/YARAHQ/yara-forge) rule package.
 
 Any finding fails the run. On a release it stops publishing before PyPI,
-and the report is attached to the GitHub release as
-`security-report.md` whether the scans passed or not, so a blocked release
+and the reports are attached to the GitHub release as
+`security-report.md` and `malware-report.md` whether the scans passed or
+not, so a blocked release
 says what blocked it.
 
 A malware finding known to be false is listed, with the evidence, in
@@ -95,7 +96,7 @@ something that moves it:
 Dependabot and the weekly workflow both wait until a release is a week old
 before proposing it. The weekly workflow takes each SHA-256 from the digest
 GitHub recorded for the release asset, opens a pull request, and runs the
-security scans on it before it can be merged.
+malware scan on it before it can be merged.
 
 Two inputs are deliberately left to change on their own: ClamAV's
 signatures and Semgrep's registry rulesets, which change many times a day.

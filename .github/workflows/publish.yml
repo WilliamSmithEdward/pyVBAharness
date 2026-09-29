@@ -8,9 +8,9 @@
 # candidate can be downloaded from the run and tested locally against real
 # Excel before it is tagged.
 #
-# The security workflow runs as a gate: any finding stops the release before
-# PyPI, and its report is attached to the GitHub release either way, so a
-# blocked release says why.
+# The security and malware scan workflows run as gates: any finding stops
+# the release before PyPI, and their reports are attached to the GitHub
+# release either way, so a blocked release says why.
 
 on:
   release:
@@ -22,13 +22,19 @@ permissions:
 
 jobs:
   security:
+    name: Security
     uses: ./.github/workflows/security.yml
     permissions:
       contents: read
       security-events: write
       actions: read
 
+  malware-scan:
+    name: Malware scan
+    uses: ./.github/workflows/malware-scan.yml
+
   build:
+    name: Build
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,9 +103,10 @@ jobs:
 
   attach-security-report:
     # Runs whether or not the scans passed: a release blocked by a finding
-    # should carry the report that blocked it.
+    # should carry the reports that blocked it.
+    name: Attach the reports
     if: always() && github.event_name == 'release' && needs.security.result != 'skipped'
-    needs: security
+    needs: [security, malware-scan]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -108,19 +115,24 @@ jobs:
         with:
           name: security-report
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: malware-report
+
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           REPO: ${{ github.repository }}
-        run: gh release upload "$RELEASE_TAG" security-report.md --clobber --repo "$REPO"
+        run: gh release upload "$RELEASE_TAG" security-report.md malware-report.md --clobber --repo "$REPO"
 
   pypi:
-    # Only a published release reaches PyPI, and only past a clean security
-    # run. A manual run stops after the build job, leaving an artifact to
+    # Only a published release reaches PyPI, and only past clean security
+    # and malware scan runs. A manual run stops after the build job, leaving an artifact to
     # download and test.
+    name: Publish to PyPI
     if: github.event_name == 'release'
-    needs: [build, security]
+    needs: [build, security, malware-scan]
     runs-on: ubuntu-24.04
     environment:
       name: pypi

@@ -1,14 +1,16 @@
-"""Gate and summarise the security scans run by .github/workflows/security.yml.
+"""Gate and summarise the scans run by .github/workflows/security.yml and
+.github/workflows/malware-scan.yml.
 
     python security_report.py gate <path> [<path> ...]
     python security_report.py report <results-dir> <output.md>
+    python security_report.py malware-report <malware.json> <output.md>
 
 ``gate`` exits 1 when any SARIF file under the given paths carries a result.
 CodeQL's analyze step uploads its findings but succeeds regardless, so
 without this a release would ship past an alert nobody looked at.
 
-``report`` writes the Markdown report attached to each GitHub release. It
-reads whatever the scan jobs left behind and records a job that produced
+``report`` and ``malware-report`` write the Markdown reports attached to
+each GitHub release. They read whatever the scan jobs left behind and records a job that produced
 nothing as exactly that, rather than as a pass.
 
 Standard library only, so it runs on any runner without an install step.
@@ -85,25 +87,45 @@ def _row(check: str, tool: str, status: str, count: object) -> str:
     return f"| {check} | {tool} | {status} | {count} |"
 
 
-def report(results_dir: str, output: str) -> int:
-    root = Path(results_dir)
-    lines: list[str] = []
-    detail: list[str] = []
-    failed = False
-
+def _header(title: str) -> list[str]:
     ref = os.environ.get("REF_NAME", "")
     sha = os.environ.get("COMMIT_SHA", "")
     run_url = os.environ.get("RUN_URL", "")
     when = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    lines.append(f"# Security report{': ' + ref if ref else ''}")
-    lines.append("")
-    lines.append(f"Commit `{sha}`, scanned {when}.")
+    lines = [f"# {title}{': ' + ref if ref else ''}", "",
+             f"Commit `{sha}`, scanned {when}."]
     if run_url:
         lines.append(f"Produced by [this workflow run]({run_url}).")
+    lines += ["", "| Check | Tool | Result | Findings |",
+              "| --- | --- | --- | --- |"]
+    return lines
+
+
+def _write(output: str, lines: list[str], detail: list[str], failed: bool,
+           rulesets: str) -> int:
     lines.append("")
-    lines.append("| Check | Tool | Result | Findings |")
-    lines.append("| --- | --- | --- | --- |")
+    lines.append("**Overall: " + ("FAIL" if failed else "pass") + ".** "
+                 "Any finding, or any scan that produced no output, fails "
+                 "the release before it reaches PyPI.")
+    if detail:
+        lines.append("")
+        lines.append("## Detail")
+        lines.append("")
+        lines.extend(detail)
+    lines.append("")
+    lines.append(rulesets)
+    lines.append("")
+
+    Path(output).write_text("\n".join(lines), encoding="utf-8")
+    print("\n".join(lines))
+    return 1 if failed else 0
+
+
+def report(results_dir: str, output: str) -> int:
+    root = Path(results_dir)
+    lines = _header("Security report")
+    detail: list[str] = []
+    failed = False
 
     # CodeQL, one SARIF per language.
     codeql_files = sorted(root.glob("sec-codeql-*/*.sarif"))
@@ -167,8 +189,22 @@ def report(results_dir: str, output: str) -> int:
                           f"no output (job {_job('dependencies')})", "-"))
         failed = True
 
+    return _write(output, lines, detail, failed,
+                  "Rulesets: CodeQL `security-extended` for Python and "
+                  "GitHub Actions; Semgrep `p/python`, `p/security-audit`, "
+                  "`p/secrets` and `p/github-actions`. ClamAV and YARA-X "
+                  "are in the malware report. Secret scanning with push "
+                  "protection runs on the repository continuously. To "
+                  "report a vulnerability, see SECURITY.md.")
+
+
+def malware_report(malware_json: str, output: str) -> int:
+    lines = _header("Malware report")
+    detail: list[str] = []
+    failed = False
+
     # ClamAV and YARA-X, summarised by malware_scan.py.
-    malware = root / "sec-malware" / "malware.json"
+    malware = Path(malware_json)
     if malware.is_file():
         data = json.loads(malware.read_text(encoding="utf-8"))
         clam, yara = data["clamav"], data["yara"]
@@ -215,34 +251,16 @@ def report(results_dir: str, output: str) -> int:
         for problem in data["problems"]:
             detail.append(f"- {problem}")
     else:
-        for check, tool in (("Malware signatures", "ClamAV"),
-                            ("YARA rules", "YARA-X")):
+        for check, tool, key in (("Malware signatures", "ClamAV", "clamav"),
+                                 ("YARA rules", "YARA-X", "yara_x")):
             lines.append(_row(check, tool,
-                              f"no output (job {_job('malware')})", "-"))
+                              f"no output (job {_job(key)})", "-"))
         failed = True
 
-    lines.append("")
-    lines.append("**Overall: " + ("FAIL" if failed else "pass") + ".** "
-                 "Any finding, or any scan that produced no output, fails "
-                 "the release before it reaches PyPI.")
-    if detail:
-        lines.append("")
-        lines.append("## Detail")
-        lines.append("")
-        lines.extend(detail)
-    lines.append("")
-    lines.append("Rulesets: CodeQL `security-extended` for Python and GitHub "
-                 "Actions; Semgrep `p/python`, `p/security-audit`, "
-                 "`p/secrets` and `p/github-actions`; ClamAV and YARA-X over "
-                 "the source tree, the built wheel and sdist, and their "
-                 "contents. Secret scanning with push protection runs on the "
-                 "repository continuously. To report a vulnerability, see "
-                 "SECURITY.md.")
-    lines.append("")
-
-    Path(output).write_text("\n".join(lines), encoding="utf-8")
-    print("\n".join(lines))
-    return 1 if failed else 0
+    return _write(output, lines, detail, failed,
+                  "ClamAV and YARA-X over the source tree, the built wheel "
+                  "and sdist, and their contents. To report a "
+                  "vulnerability, see SECURITY.md.")
 
 
 def main(argv: list[str]) -> int:
@@ -250,6 +268,8 @@ def main(argv: list[str]) -> int:
         return gate(argv[1:])
     if len(argv) == 3 and argv[0] == "report":
         return report(argv[1], argv[2])
+    if len(argv) == 3 and argv[0] == "malware-report":
+        return malware_report(argv[1], argv[2])
     print(__doc__, file=sys.stderr)
     return 2
 

@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
     # Windows only: several modules bind user32/kernel32 through ctypes at
     # import time, so the package cannot even be imported elsewhere.
     runs-on: windows-2025
@@ -54,8 +55,9 @@ jobs:
         run: python -m pytest tests/unit -q
 
   build:
+    name: Build
     runs-on: windows-2025
-    needs: unit
+    needs: test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -129,19 +131,22 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  result:
-    # The one check branch protection requires. Its name stays fixed while
+  ci-passed:
+    # The one check the ruleset requires. Its name stays fixed while
     # the jobs above change, the matrix names included, which move whenever
     # a Python pin does. Anything short of every job succeeding fails it,
     # skipped included, since a skipped job did not pass.
-    name: CI result
+    name: CI passed
     if: always()
-    needs: [unit, build]
+    needs: [test, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Check every job passed
+      - name: Check every CI job passed
         env:
-          NEEDS: ${{ toJSON(needs) }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
-          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' > /dev/null
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            [ "$result" = success ] || exit 1
+          done

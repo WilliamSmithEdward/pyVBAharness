@@ -1,4 +1,4 @@
-# ClamAV engine for the malware scan in .github/workflows/security.yml,
+# ClamAV engine for the malware scan in .github/workflows/malware-scan.yml,
 # pinned by digest; Dependabot proposes version and digest bumps.
 #
 # The _base variant ships without signature databases. Signatures are not

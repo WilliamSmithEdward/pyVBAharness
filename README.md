@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml)
 [![Security](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml)
+[![Malware scan](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml)
 [![PyPI](https://img.shields.io/pypi/v/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
 [![Python](https://img.shields.io/pypi/pyversions/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
 [![License: MIT](https://img.shields.io/github/license/WilliamSmithEdward/pyVBAharness)](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE)
@@ -597,8 +598,8 @@ rather than in a public issue.
 Every push, pull request and release, and a daily run, scans the code with
 CodeQL, Semgrep and pip-audit, and the source and the built packages with
 ClamAV and YARA-X. Any finding fails the run, and a release that fails
-stops before PyPI. Each GitHub release carries the report as
-`security-report.md`. Everything the scans and builds depend on is pinned,
+stops before PyPI. Each GitHub release carries the reports as
+`security-report.md` and `malware-report.md`. Everything the scans and builds depend on is pinned,
 by commit SHA, image digest, hash or checksum.
 
 Worth knowing before you use it: the harness runs whatever VBA you give it

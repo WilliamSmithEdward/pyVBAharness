@@ -146,14 +146,15 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 
 `security.yml` runs CodeQL (`security-extended`, over the Python and the
 workflows), Semgrep (`p/python`, `p/security-audit`, `p/secrets`,
-`p/github-actions`), pip-audit, and ClamAV with YARA-X, and fails on any
-finding. ClamAV and YARA-X share one job, "ClamAV + YARA-X", which builds
-the wheel and sdist and scans them, their contents, and the source tree.
-It runs on pushes, pull requests and daily on its own, and `publish.yml`
-calls it as a gate: the PyPI job needs it to pass, so a finding stops a
-release before anything is uploaded. Either way its report is attached to
-the GitHub release as `security-report.md`, so a blocked release says what
-blocked it. The dry-run path runs the scans too.
+`p/github-actions`) and pip-audit, and fails on any finding.
+`malware-scan.yml` runs ClamAV and YARA-X, one job each, which build the
+wheel and sdist and scan them, their contents, and the source tree; its
+report job fails on any finding. Both run on pushes, pull requests and
+daily on their own, and `publish.yml` calls both as gates: the PyPI job
+needs them to pass, so a finding stops a release before anything is
+uploaded. Either way their reports are attached to the GitHub release as
+`security-report.md` and `malware-report.md`, so a blocked release says
+what blocked it. The dry-run path runs the scans too.
 
 A finding is fixed, or recorded as false where the evidence supports it:
 
@@ -168,11 +169,11 @@ There is no threshold to lower, deliberately.
 
 Every pin the scans depend on has an updater; SECURITY.md has the table.
 Dependabot proposes action, image and tool bumps weekly, each at least a
-week old. `yara-forge-update.yml` does the same for YARA-X and its rules,
+week old. `update-yara-rules.yml` does the same for YARA-X and its rules,
 which are GitHub release downloads Dependabot cannot follow: it opens a
-pull request pinning the new release and SHA-256, and dispatches Security
-and CI on that branch, because a pull request opened by a workflow starts
-no workflows of its own. Merge it once Security is green. Keep new actions
+pull request pinning the new release and SHA-256, and dispatches Malware
+scan and CI on that branch, because a pull request opened by a workflow
+starts no workflows of its own. Merge it once Malware scan is green. Keep new actions
 pinned the same way: Semgrep's `github-actions-mutable-action-tag` rule
 fails the build on a `@v4`.
 
@@ -185,13 +186,13 @@ runner; rerun it later.
 Two repository rulesets (Settings > Rules > Rulesets) protect what a
 release depends on.
 
-"main" covers the default branch. A pull request needs two checks to
-merge, "CI result" and "Security result", each pinned to the GitHub
-Actions app so no other integration can satisfy them. They are summary
-jobs that depend on every other job in their workflow and pass only if all
-of them succeeded, so renaming or adding a job, or moving a Python pin that
-names a matrix job, never needs the ruleset changed. A job added to either
-workflow does need adding to its result job's `needs`. Force pushes and
+"main" covers the default branch. A pull request needs the gate checks to
+merge, "CI passed", "Security passed" and "Malware scan passed", each
+pinned to the GitHub Actions app so no other integration can satisfy them.
+They are gate jobs that depend on every other job in their workflow and
+pass only if all of them succeeded, so renaming or adding a job, or moving a Python pin that
+names a matrix job, never needs the ruleset changed. A job added to any
+workflow does need adding to its gate job's `needs`. Force pushes and
 deleting the branch are refused.
 
 "release tags" covers `v*`. Only a repository admin can create, move or
