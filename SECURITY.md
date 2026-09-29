@@ -60,8 +60,8 @@ Every push, every pull request, daily, and every release:
 - **pip-audit**, for known vulnerabilities in the runtime dependencies.
 - **ClamAV**, over the source tree, the built wheel and sdist, and their
   contents, with the official databases plus the free Sanesecurity,
-  InterServer and URLhaus feeds. Signatures are fetched fresh on every run,
-  and their versions are recorded in the report.
+  InterServer and URLhaus feeds. Signatures are brought up to date on
+  every run, and their versions are recorded in the report.
 - **YARA-X**, over the same files, with the full
   [YARA Forge](https://github.com/YARAHQ/yara-forge) rule package.
 

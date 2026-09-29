@@ -24,8 +24,8 @@ name: Security
 # and tools, and yara-forge-update.yml moves the release downloads. Nothing
 # can follow runner labels or Python versions; move those by hand, as the
 # note on ci.yml's matrix describes. Signatures are the exception: ClamAV's
-# change many times a day, so they are fetched and verified fresh on every
-# run, and the report records which versions were used.
+# change many times a day, so freshclam brings them up to date and verifies
+# them on every run, and the report records which versions were used.
 
 on:
   push:

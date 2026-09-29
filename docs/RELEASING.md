@@ -176,8 +176,9 @@ no workflows of its own. Merge it once Security is green. Keep new actions
 pinned the same way: Semgrep's `github-actions-mutable-action-tag` rule
 fails the build on a `@v4`.
 
-ClamAV downloads its signatures fresh every run and fails the scan if that
-update fails, rather than scanning with whatever the cache held. If a run
+ClamAV brings its signatures up to date on every run, from a cache so that
+only the day's changes are downloaded, and fails the scan if that update
+fails, rather than scanning with whatever the cache held. If a run
 fails at freshclam, it is usually ClamAV's mirrors rate-limiting the
 runner; rerun it later.
 

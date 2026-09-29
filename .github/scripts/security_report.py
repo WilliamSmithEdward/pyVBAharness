@@ -193,7 +193,7 @@ def report(results_dir: str, output: str) -> int:
         official = ", ".join(f"{name} {version}" for name, version
                              in sorted(clam["databases"].items()))
         detail.append(
-            f"- ClamAV signatures, fetched fresh for this run: official "
+            f"- ClamAV signatures, brought up to date for this run: official "
             f"{official or 'versions not recorded'}, plus "
             f"{len(clam['unofficial_files'])} files from the free "
             f"Sanesecurity, InterServer and URLhaus feeds; "
