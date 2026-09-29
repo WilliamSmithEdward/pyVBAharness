@@ -7,6 +7,10 @@
 # The manual trigger builds and verifies without publishing, so a release
 # candidate can be downloaded from the run and tested locally against real
 # Excel before it is tagged.
+#
+# The security workflow runs as a gate: any finding stops the release before
+# PyPI, and its report is attached to the GitHub release either way, so a
+# blocked release says why.
 
 on:
   release:
@@ -17,12 +21,21 @@ permissions:
   contents: read
 
 jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -37,9 +50,13 @@ jobs:
       - name: Check the release tag matches the project version
         if: github.event_name == 'release'
         shell: pwsh
+        env:
+          # Through the environment rather than interpolated into the script,
+          # so a tag name can never be parsed as PowerShell.
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           $version = python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])"
-          $tag = "${{ github.event.release.tag_name }}" -replace '^v', ''
+          $tag = $env:RELEASE_TAG -replace '^v', ''
           if ($tag -ne $version) {
             throw "Release tag '$tag' does not match project version '$version'. Bump pyproject.toml and src/pyvbaharness/__init__.py together, then retag."
           }
@@ -70,17 +87,38 @@ jobs:
           # it explicitly or the step fails after reporting success.
           exit 0
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: distributions
           path: dist/
           if-no-files-found: error
 
+  attach-security-report:
+    # Runs whether or not the scans passed: a release blocked by a finding
+    # should carry the report that blocked it.
+    if: always() && github.event_name == 'release' && needs.security.result != 'skipped'
+    needs: security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: security-report
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" security-report.md --clobber --repo "$REPO"
+
   pypi:
-    # Only a published release reaches PyPI. A manual run stops after the
-    # build job, leaving an artifact to download and test.
+    # Only a published release reaches PyPI, and only past a clean security
+    # run. A manual run stops after the build job, leaving an artifact to
+    # download and test.
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, security]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -88,9 +126,9 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: distributions
           path: dist/
 
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2

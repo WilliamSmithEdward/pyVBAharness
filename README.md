@@ -1,5 +1,11 @@
 ﻿# pyVBAharness
 
+[![CI](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml)
+[![Security](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml)
+[![PyPI](https://img.shields.io/pypi/v/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
+[![Python](https://img.shields.io/pypi/pyversions/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
+[![License: MIT](https://img.shields.io/github/license/WilliamSmithEdward/pyVBAharness)](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE)
+
 Run VBA in desktop Excel, Word, PowerPoint and Access from Python, under a
 supervisor that enforces a deadline on every call.
 
@@ -580,6 +586,24 @@ screen.
 | [Troubleshooting](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/troubleshooting.md) | What each failure means and what to do about it |
 | [Implementation guide](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/IMPLEMENTATION_GUIDE.md) | How to change the code; catalog of measured Office behaviors |
 | [Releasing](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/docs/RELEASING.md) | Version bump, validation, and the PyPI publishing workflow |
+| [Security policy](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/SECURITY.md) | Reporting a vulnerability, and what is in scope |
+
+## Security
+
+Report a vulnerability privately, through
+[GitHub's private vulnerability reporting](https://github.com/WilliamSmithEdward/pyVBAharness/security/advisories/new),
+rather than in a public issue.
+
+Every push, pull request and release runs CodeQL, Semgrep and pip-audit,
+and any finding fails the run. A release that fails stops before PyPI.
+Each GitHub release carries the report as `security-report.md`.
+
+Worth knowing before you use it: the harness runs whatever VBA you give it
+and contains a hang, not what the code does, so running VBA you do not
+trust is running code you do not trust. It also needs the Office setting
+that lets code modify VBA projects, which is a development-machine setting.
+[SECURITY.md](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/SECURITY.md)
+has the details and what counts as in scope.
 
 ## Built with this
 

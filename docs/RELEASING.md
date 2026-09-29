@@ -116,7 +116,13 @@ accidental release.
    byte-identical to what a release would upload, and it can be exercised
    against real Excel, which no hosted index or runner can do.
 
-6. Tag and publish. Creating the GitHub release triggers the real publish:
+   Check the Security run is green on the commit you are about to tag.
+   Publishing will run it again as a gate, but finding out there costs a
+   tag and a release to clean up.
+
+6. Tag and publish. Creating the GitHub release triggers the real publish,
+   behind the security gate, and attaches `security-report.md` to the
+   release:
 
    ```powershell
    git tag v<version>
@@ -138,10 +144,30 @@ Only a published release goes on to the PyPI job; a manual run stops after
 the build, which is the dry-run path. The build job runs on Windows so the
 tests are meaningful; publishing runs on Linux because it only moves files.
 
+`security.yml` runs CodeQL (`security-extended`, over the Python and the
+workflows), Semgrep (`p/python`, `p/security-audit`, `p/secrets`,
+`p/github-actions`) and pip-audit, and fails on any finding. It runs on
+pushes, pull requests and weekly on its own, and `publish.yml` calls it as
+a gate: the PyPI job needs it to pass, so a finding stops a release before
+anything is uploaded. Either way its report is attached to the GitHub
+release as `security-report.md`, so a blocked release says what blocked it.
+The dry-run path runs the scans too.
+
+A finding is fixed, or suppressed in source with a comment saying why it
+does not apply: `# nosemgrep: <rule-id>` for Semgrep, and for CodeQL a
+dismissal on the alert in the Security tab with a reason. There is no
+threshold to lower, deliberately.
+
+Actions are pinned to commit SHAs with the version in a trailing comment,
+and scanner versions are pinned in `.github/security/requirements.txt`, so
+the gate changes only when a pin does. Dependabot proposes those bumps
+weekly. Keep new actions pinned the same way: Semgrep's
+`github-actions-mutable-action-tag` rule fails the build on a `@v4`.
+
 ## Limits worth knowing
 
 CI cannot validate against real Office. Hosted runners have no Office
-installation, so the 123 live tests, which are the ones that actually prove
+installation, so the 129 live tests, which are the ones that actually prove
 the harness works, only ever run on a developer machine. Treat a green CI
 badge as "the pure logic is intact and the package builds", not as "the
 harness works".

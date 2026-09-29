@@ -1,0 +1,30 @@
+version: 2
+
+updates:
+  # Workflow actions are pinned to commit SHAs, which only move when
+  # something moves them. This is what moves them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # The package's own dependencies. This is a library, so a floor in
+  # pyproject.toml is a compatibility claim, not a pin: raise it only when
+  # a new release falls outside the declared range.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: increase-if-necessary
+
+  # Scanner versions for the security workflow, which are exact pins.
+  - package-ecosystem: pip
+    directory: /.github/security
+    schedule:
+      interval: weekly
+    groups:
+      security-tools:
+        patterns: ["*"]
