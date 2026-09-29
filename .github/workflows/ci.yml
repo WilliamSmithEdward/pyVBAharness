@@ -128,3 +128,20 @@ jobs:
           name: distributions
           path: dist/
           if-no-files-found: error
+
+  result:
+    # The one check branch protection requires. Its name stays fixed while
+    # the jobs above change, the matrix names included, which move whenever
+    # a Python pin does. Anything short of every job succeeding fails it,
+    # skipped included, since a skipped job did not pass.
+    name: CI result
+    if: always()
+    needs: [unit, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' > /dev/null

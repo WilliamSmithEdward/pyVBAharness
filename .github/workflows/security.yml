@@ -309,3 +309,19 @@ jobs:
           name: security-report
           path: security-report.md
           if-no-files-found: error
+
+  result:
+    # The one check branch protection requires; see the same job in ci.yml.
+    # It includes the report, so a report that could not be written blocks
+    # a merge as surely as a finding does.
+    name: Security result
+    if: always()
+    needs: [codeql, semgrep, dependencies, malware, report]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.value.result)\t\(.key)"'
+          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success")' > /dev/null
