@@ -167,6 +167,60 @@ def report(results_dir: str, output: str) -> int:
                           f"no output (job {_job('dependencies')})", "-"))
         failed = True
 
+    # ClamAV and YARA-X, summarised by malware_scan.py.
+    malware = root / "sec-malware" / "malware.json"
+    if malware.is_file():
+        data = json.loads(malware.read_text(encoding="utf-8"))
+        clam, yara = data["clamav"], data["yara"]
+        by_engine = {"clamav": [], "yara-x": []}
+        for finding in data["unexpected"]:
+            by_engine[finding["engine"]].append(finding)
+        accepted = {"clamav": 0, "yara-x": 0}
+        for finding in data["accepted"]:
+            accepted[finding["engine"]] += 1
+        for key, check, tool, done in (
+                ("clamav", "Malware signatures",
+                 f"ClamAV {clam['engine']}", clam["completed"]),
+                ("yara-x", "YARA rules",
+                 f"YARA-X {yara['engine']}", yara["completed"])):
+            found = by_engine[key]
+            status = "pass" if done and not found else "FAIL"
+            count = str(len(found))
+            if accepted[key]:
+                count += f" ({accepted[key]} accepted)"
+            lines.append(_row(check, tool, status, count))
+        failed |= bool(data["failed"])
+        official = ", ".join(f"{name} {version}" for name, version
+                             in sorted(clam["databases"].items()))
+        detail.append(
+            f"- ClamAV signatures, fetched fresh for this run: official "
+            f"{official or 'versions not recorded'}, plus "
+            f"{len(clam['unofficial_files'])} files from the free "
+            f"Sanesecurity, InterServer and URLhaus feeds; "
+            f"{clam['signatures']} signatures in all, over "
+            f"{clam['files_scanned']} files.")
+        detail.append(f"- YARA rules: YARA Forge {yara['rules_release']}, "
+                      f"{yara['rules']} rules, pinned by SHA-256.")
+        for finding in data["unexpected"]:
+            detail.append(f"- {finding['engine']} `{finding['match']}` in "
+                          f"`{finding['path']}`")
+        for finding in data["accepted"]:
+            detail.append(f"- Accepted: {finding['engine']} "
+                          f"`{finding['match']}` in `{finding['path']}`, "
+                          "documented in "
+                          "`.github/security/accepted-findings.toml`.")
+        for match in data["unused_acceptances"]:
+            detail.append(f"- Accepted finding `{match}` no longer matches "
+                          "anything and can be removed.")
+        for problem in data["problems"]:
+            detail.append(f"- {problem}")
+    else:
+        for check, tool in (("Malware signatures", "ClamAV"),
+                            ("YARA rules", "YARA-X")):
+            lines.append(_row(check, tool,
+                              f"no output (job {_job('malware')})", "-"))
+        failed = True
+
     lines.append("")
     lines.append("**Overall: " + ("FAIL" if failed else "pass") + ".** "
                  "Any finding, or any scan that produced no output, fails "
@@ -179,9 +233,11 @@ def report(results_dir: str, output: str) -> int:
     lines.append("")
     lines.append("Rulesets: CodeQL `security-extended` for Python and GitHub "
                  "Actions; Semgrep `p/python`, `p/security-audit`, "
-                 "`p/secrets` and `p/github-actions`. Secret scanning with "
-                 "push protection runs on the repository continuously. To "
-                 "report a vulnerability, see SECURITY.md.")
+                 "`p/secrets` and `p/github-actions`; ClamAV and YARA-X over "
+                 "the source tree, the built wheel and sdist, and their "
+                 "contents. Secret scanning with push protection runs on the "
+                 "repository continuously. To report a vulnerability, see "
+                 "SECURITY.md.")
     lines.append("")
 
     Path(output).write_text("\n".join(lines), encoding="utf-8")

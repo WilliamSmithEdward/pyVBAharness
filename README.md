@@ -594,9 +594,12 @@ Report a vulnerability privately, through
 [GitHub's private vulnerability reporting](https://github.com/WilliamSmithEdward/pyVBAharness/security/advisories/new),
 rather than in a public issue.
 
-Every push, pull request and release runs CodeQL, Semgrep and pip-audit,
-and any finding fails the run. A release that fails stops before PyPI.
-Each GitHub release carries the report as `security-report.md`.
+Every push, pull request and release, and a daily run, scans the code with
+CodeQL, Semgrep and pip-audit, and the source and the built packages with
+ClamAV and YARA-X. Any finding fails the run, and a release that fails
+stops before PyPI. Each GitHub release carries the report as
+`security-report.md`. Everything the scans and builds depend on is pinned,
+by commit SHA, image digest, hash or checksum.
 
 Worth knowing before you use it: the harness runs whatever VBA you give it
 and contains a hang, not what the code does, so running VBA you do not

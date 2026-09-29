@@ -1,0 +1,40 @@
+# Malware-scan findings known to be false, and why.
+#
+# A ClamAV or YARA-X finding fails the Security workflow and blocks a release
+# unless it is listed here. An entry must say what it matches, where, why it
+# is not a real detection, and what would let it be removed. The scan refuses
+# an entry without a reason, reports an entry that no longer matches
+# anything so it can be deleted, and never treats a listed finding in any
+# other file as accepted.
+#
+# Fields:
+#   engine       "clamav" or "yara-x"
+#   match        ClamAV signature name, or YARA rule identifier, exactly
+#   paths        files it is accepted in, relative to the scan tree:
+#                repo/ (the checkout, without .git), dist/ (the built wheel
+#                and sdist), unpacked/ (their contents). Globs are allowed,
+#                but name files: an accepted finding should not grow.
+#   reason       why this is not a real detection, with the evidence
+#   remove_when  the change after which the entry should no longer match
+
+[[finding]]
+engine = "yara-x"
+match = "SIGNATURE_BASE_Powershell_Case_Anomaly"
+paths = [
+  "repo/docs/troubleshooting.md",
+  "repo/docs/IMPLEMENTATION_GUIDE.md",
+]
+reason = """
+The rule looks for obfuscated PowerShell by counting "powershell" case
+insensitively and firing when that exceeds the count of its seven ordinary
+spellings. These files contain only the lowercase ```powershell Markdown
+fence tag, which is one of those spellings, so the rule should not fire.
+
+It fires because of the engine. Measured 2026-09-29 on the same bytes: the
+rule compiled alone does not match these files; compiled together with
+SEKOIA_Apt_Kimsuky_Sharptongue_Vbslauncher_Strings, which declares the
+identical pattern "powershell" ascii wide, it does. That pair reproduces on
+YARA-X 1.20.0 and not on 1.21.0. The 1.21.0 release notes do not name a
+fix, so the cause is not identified further than that.
+"""
+remove_when = "YARA-X 1.21.0 or later is pinned in .github/security/pins.json"

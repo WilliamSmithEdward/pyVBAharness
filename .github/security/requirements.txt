@@ -1,4 +1,0 @@
-# Scanner versions for .github/workflows/security.yml. Pinned so a release
-# gate only changes when this file does; Dependabot proposes the bumps.
-semgrep==1.178.0
-pip-audit==2.10.1

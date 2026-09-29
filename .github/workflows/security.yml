@@ -1,27 +1,38 @@
 name: Security
 
-# Three independent scans, each of which fails the run on any finding:
+# Independent scans, each of which fails the run on any finding:
 #
-#   CodeQL     security-extended queries for the Python and for these
-#              workflow files
-#   Semgrep    p/python, p/security-audit, p/secrets, p/github-actions
-#   pip-audit  known vulnerabilities in the runtime dependency tree
+#   CodeQL           security-extended queries, over the Python and over
+#                    these workflow files
+#   Semgrep          p/python, p/security-audit, p/secrets, p/github-actions
+#   pip-audit        known vulnerabilities in the runtime dependency tree
+#   ClamAV + YARA-X  malware signatures and YARA rules, over the source, the
+#                    built wheel and sdist, and their contents
 #
 # Publish calls this as a gate, so nothing reaches PyPI past a finding, and
 # attaches the report job's output to the GitHub release. It also runs on
-# every push and pull request, and weekly, because a new advisory can land
-# against code that has not changed.
+# every push and pull request, and daily, because signatures and advisories
+# change when the code does not. The weekly updater in yara-forge-update.yml
+# dispatches it on the branch it proposes, which is how a new YARA release
+# is scanned before anyone merges it.
 #
-# Actions are pinned to commit SHAs, with the version they resolve to in a
-# trailing comment; Dependabot proposes the bumps. Scanner versions are
-# pinned in .github/security/requirements.txt for the same reason.
+# Pinning: actions by commit SHA with the version in a trailing comment;
+# runners by OS release and Python by exact version; Semgrep and ClamAV by
+# image digest (.github/security/*/Dockerfile); Python tools by hash
+# (.github/security/*/requirements.txt); YARA-X and its rules by release and
+# SHA-256 (.github/security/pins.json). Dependabot moves the actions, images
+# and tools, and yara-forge-update.yml moves the release downloads. Nothing
+# can follow runner labels or Python versions; move those by hand, as the
+# note on ci.yml's matrix describes. Signatures are the exception: ClamAV's
+# change many times a day, so they are fetched and verified fresh on every
+# run, and the report records which versions were used.
 
 on:
   push:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "17 6 * * 1"
+    - cron: "17 6 * * *"
   workflow_dispatch:
   workflow_call:
 
@@ -31,7 +42,7 @@ permissions:
 jobs:
   codeql:
     name: CodeQL (${{ matrix.language }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       security-events: write
@@ -68,7 +79,7 @@ jobs:
           if-no-files-found: ignore
 
   semgrep:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       security-events: write
@@ -77,27 +88,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install
-        run: python -m pip install -r .github/security/requirements.txt
-
       - name: Semgrep
         # --error fails the step on any finding. Parse warnings from the
         # PowerShell run blocks in the workflows are reported by Semgrep
         # but are not findings, and do not fail it.
-        run: >-
-          semgrep scan
-          --config p/python
-          --config p/security-audit
-          --config p/secrets
-          --config p/github-actions
-          --metrics=off
-          --error
-          --sarif-output=semgrep.sarif
-          --json-output=semgrep.json
+        run: |
+          docker build --quiet --tag pyvba-semgrep .github/security/semgrep
+          docker run --rm --volume "$PWD:/src" --workdir /src pyvba-semgrep \
+            semgrep scan \
+              --config p/python \
+              --config p/security-audit \
+              --config p/secrets \
+              --config p/github-actions \
+              --metrics=off \
+              --error \
+              --sarif-output=semgrep.sarif \
+              --json-output=semgrep.json
 
       - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         if: always() && hashFiles('semgrep.sarif') != ''
@@ -117,7 +123,7 @@ jobs:
   dependencies:
     # Windows, because the only runtime dependency (pywin32) only resolves
     # there; auditing on Linux would audit a tree nobody installs.
-    runs-on: windows-latest
+    runs-on: windows-2025
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,14 +131,16 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.14"
 
       - name: Install
-        run: python -m pip install -r .github/security/requirements.txt
+        run: python -m pip install --require-hashes --no-deps -r .github/security/pip-audit/requirements.txt
 
       - name: Audit runtime dependencies
         # --strict also fails when a dependency cannot be audited at all,
-        # which is not the same as having been audited and found clean.
+        # which is not the same as having been audited and found clean. The
+        # package's own dependencies resolve from its declared ranges, as
+        # they would for a user installing it today.
         run: >-
           pip-audit --strict --progress-spinner off
           --format json --output pip-audit.json .
@@ -144,11 +152,132 @@ jobs:
           path: pip-audit.json
           if-no-files-found: ignore
 
+  malware:
+    name: ClamAV + YARA-X
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+
+      - name: Install
+        run: python -m pip install --require-hashes --no-deps -r .github/security/malware/requirements.txt
+
+      - name: Assemble what gets scanned
+        # The checkout without .git, the wheel and sdist a release would
+        # upload, and their contents, since YARA does not open archives. The
+        # build resolves its backend from pyproject.toml's build-system range,
+        # as the release build does, so the artifact scanned is built the way
+        # the one published is.
+        run: |
+          scan="$RUNNER_TEMP/scan"
+          mkdir -p "$scan/dist" "$scan/unpacked/sdist"
+          rsync -a --exclude .git ./ "$scan/repo/"
+          python -m build --outdir "$scan/dist"
+          python -m zipfile -e "$scan"/dist/*.whl "$scan/unpacked/wheel"
+          tar -xzf "$scan"/dist/*.tar.gz -C "$scan/unpacked/sdist"
+          echo "files to scan: $(find "$scan" -type f | wc -l)"
+
+      - name: Restore ClamAV databases
+        # A cache, so freshclam applies the day's differences rather than
+        # downloading every database again: ClamAV's mirrors rate-limit
+        # repeated full downloads, and runners share addresses. freshclam
+        # still updates on every run. freshclam.dat is left out because it
+        # records a rate-limit cool-down, which must not outlive its run.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/clam/clamdb
+            !${{ runner.temp }}/clam/clamdb/freshclam.dat
+          key: clamdb-${{ github.run_id }}
+          restore-keys: clamdb-
+
+      - name: Fetch the unofficial ClamAV feeds
+        # Sanesecurity, InterServer and URLhaus; see fangfrisch.conf.
+        run: |
+          mkdir -p "$RUNNER_TEMP/clam/clamdb"
+          cp .github/security/fangfrisch.conf "$RUNNER_TEMP/clam/"
+          cd "$RUNNER_TEMP/clam"
+          fangfrisch --conf fangfrisch.conf initdb
+          fangfrisch --conf fangfrisch.conf refresh
+          chmod -R a+rwX clamdb
+
+      - name: ClamAV
+        # freshclam fetches the official databases and checks their
+        # signatures. A failed update fails the job: scanning with whatever
+        # the cache held would pass with less than it claims.
+        run: |
+          docker build --quiet --tag pyvba-clamav .github/security/clamav
+          docker run --rm --entrypoint sh \
+            --volume "$RUNNER_TEMP/clam/clamdb:/var/lib/clamav" \
+            --volume "$RUNNER_TEMP/clam:/out" \
+            --volume "$RUNNER_TEMP/scan:/scan:ro" \
+            pyvba-clamav -c '
+              freshclam --stdout > /out/freshclam.log 2>&1 || { cat /out/freshclam.log; exit 1; }
+              clamscan --version > /out/clamscan.log
+              clamscan -r --infected --scan-archive=yes /scan >> /out/clamscan.log 2>&1
+              echo $? > /out/clamscan.exit
+            '
+          grep -E "updated|up-to-date" "$RUNNER_TEMP/clam/freshclam.log" || true
+          tail -12 "$RUNNER_TEMP/clam/clamscan.log"
+
+      - name: YARA-X
+        # Engine and rules are release downloads pinned by SHA-256 in
+        # pins.json; fetch refuses anything that does not match.
+        run: |
+          tools="$RUNNER_TEMP/yara"
+          python .github/scripts/pinned_release.py fetch yara-x "$tools"
+          python .github/scripts/pinned_release.py fetch yara-forge "$tools"
+          tar -xzf "$tools"/yara-x-*.tar.gz -C "$tools"
+          python -m zipfile -e "$tools/yara-forge-rules-full.zip" "$tools/forge"
+          rules=$(find "$tools/forge" -name '*.yar' | head -1)
+          echo "$rules" > "$tools/rules.path"
+          "$tools/yr" compile "$rules" --output "$tools/rules.yarc" 2> "$tools/compile.log"
+          cd "$RUNNER_TEMP/scan"
+          status=0
+          "$tools/yr" scan --compiled-rules "$tools/rules.yarc" . --recursive \
+            --output-format=ndjson > "$tools/yara.ndjson" 2> "$tools/scan.log" || status=$?
+          echo "$status" > "$tools/yara.exit"
+
+      - name: Gate on the results
+        run: |
+          tools="$RUNNER_TEMP/yara"
+          forge=$(python -c 'import json; p = json.load(open(".github/security/pins.json"))["yara-forge"]; print(p["tag"], "(" + p["asset"].removeprefix("yara-forge-rules-").removesuffix(".zip") + ")")')
+          python .github/scripts/malware_scan.py \
+            --clamscan-log "$RUNNER_TEMP/clam/clamscan.log" \
+            --clamscan-exit "$(cat "$RUNNER_TEMP/clam/clamscan.exit")" \
+            --freshclam-log "$RUNNER_TEMP/clam/freshclam.log" \
+            --clamdb "$RUNNER_TEMP/clam/clamdb" \
+            --yara-ndjson "$tools/yara.ndjson" \
+            --yara-exit "$(cat "$tools/yara.exit")" \
+            --yara-rules "$(cat "$tools/rules.path")" \
+            --yara-engine "$("$tools/yr" --version | awk '{print $2}')" \
+            --yara-rules-release "$forge" \
+            --accepted .github/security/accepted-findings.toml \
+            --strip /scan --strip "$RUNNER_TEMP/scan" \
+            --out "$RUNNER_TEMP/malware.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: sec-malware
+          path: |
+            ${{ runner.temp }}/malware.json
+            ${{ runner.temp }}/clam/freshclam.log
+            ${{ runner.temp }}/clam/clamscan.log
+            ${{ runner.temp }}/yara/yara.ndjson
+            ${{ runner.temp }}/yara/compile.log
+          if-no-files-found: ignore
+
   report:
     # Always runs, so a failed scan still produces a report saying so.
     if: always()
-    needs: [codeql, semgrep, dependencies]
-    runs-on: ubuntu-latest
+    needs: [codeql, semgrep, dependencies, malware]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -167,6 +296,7 @@ jobs:
           JOB_CODEQL: ${{ needs.codeql.result }}
           JOB_SEMGREP: ${{ needs.semgrep.result }}
           JOB_DEPENDENCIES: ${{ needs.dependencies.result }}
+          JOB_MALWARE: ${{ needs.malware.result }}
         run: |
           python3 .github/scripts/security_report.py report results security-report.md \
             && status=0 || status=$?

@@ -146,23 +146,40 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 
 `security.yml` runs CodeQL (`security-extended`, over the Python and the
 workflows), Semgrep (`p/python`, `p/security-audit`, `p/secrets`,
-`p/github-actions`) and pip-audit, and fails on any finding. It runs on
-pushes, pull requests and weekly on its own, and `publish.yml` calls it as
-a gate: the PyPI job needs it to pass, so a finding stops a release before
-anything is uploaded. Either way its report is attached to the GitHub
-release as `security-report.md`, so a blocked release says what blocked it.
-The dry-run path runs the scans too.
+`p/github-actions`), pip-audit, and ClamAV with YARA-X, and fails on any
+finding. ClamAV and YARA-X share one job, "ClamAV + YARA-X", which builds
+the wheel and sdist and scans them, their contents, and the source tree.
+It runs on pushes, pull requests and daily on its own, and `publish.yml`
+calls it as a gate: the PyPI job needs it to pass, so a finding stops a
+release before anything is uploaded. Either way its report is attached to
+the GitHub release as `security-report.md`, so a blocked release says what
+blocked it. The dry-run path runs the scans too.
 
-A finding is fixed, or suppressed in source with a comment saying why it
-does not apply: `# nosemgrep: <rule-id>` for Semgrep, and for CodeQL a
-dismissal on the alert in the Security tab with a reason. There is no
-threshold to lower, deliberately.
+A finding is fixed, or recorded as false where the evidence supports it:
 
-Actions are pinned to commit SHAs with the version in a trailing comment,
-and scanner versions are pinned in `.github/security/requirements.txt`, so
-the gate changes only when a pin does. Dependabot proposes those bumps
-weekly. Keep new actions pinned the same way: Semgrep's
-`github-actions-mutable-action-tag` rule fails the build on a `@v4`.
+- Semgrep: `# nosemgrep: <rule-id>` in source, with a comment saying why.
+- CodeQL: a dismissal on the alert in the Security tab, with a reason.
+- ClamAV and YARA-X: an entry in `.github/security/accepted-findings.toml`
+  naming the rule, the files, the evidence, and what would let the entry
+  be removed. The scan refuses an entry without a reason, and reports one
+  that no longer matches anything.
+
+There is no threshold to lower, deliberately.
+
+Every pin the scans depend on has an updater; SECURITY.md has the table.
+Dependabot proposes action, image and tool bumps weekly, each at least a
+week old. `yara-forge-update.yml` does the same for YARA-X and its rules,
+which are GitHub release downloads Dependabot cannot follow: it opens a
+pull request pinning the new release and SHA-256, and dispatches Security
+and CI on that branch, because a pull request opened by a workflow starts
+no workflows of its own. Merge it once Security is green. Keep new actions
+pinned the same way: Semgrep's `github-actions-mutable-action-tag` rule
+fails the build on a `@v4`.
+
+ClamAV downloads its signatures fresh every run and fails the scan if that
+update fails, rather than scanning with whatever the cache held. If a run
+fails at freshclam, it is usually ClamAV's mirrors rate-limiting the
+runner; rerun it later.
 
 ## Limits worth knowing
 

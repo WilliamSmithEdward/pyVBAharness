@@ -1,0 +1,97 @@
+name: YARA update
+
+# Weekly: propose the newest YARA Forge rules and YARA-X engine that are at
+# least a week old, pinned by release and SHA-256, in a pull request.
+#
+# Dependabot cannot follow a GitHub release download, so this does its job
+# for the two pins in .github/security/pins.json. The SHA-256 comes from the
+# digest GitHub recorded for the asset, and the asset is downloaded and
+# checked against it before anything is proposed; see
+# .github/scripts/pinned_release.py.
+#
+# A pull request opened with this workflow's GITHUB_TOKEN starts no other
+# workflow, so this dispatches Security and CI on the branch itself. Their
+# results appear on the pull request's commit, and Security scans the
+# repository with the proposed rules before anyone merges them. It needs the
+# repository setting "Allow GitHub Actions to create and approve pull
+# requests".
+
+on:
+  schedule:
+    - cron: "41 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  propose:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job pushes the branch it proposes, so it keeps the token
+          # checkout configures. Nothing from the workspace is uploaded.
+          persist-credentials: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+
+      - name: Find eligible releases
+        id: propose
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/pinned_release.py propose --cooldown-days 7
+
+      - name: Open the pull request and scan it
+        if: steps.propose.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.propose.outputs.summary }}
+        run: |
+          tag() { python -c "import json, sys; print(json.load(open('.github/security/pins.json'))[sys.argv[1]]['tag'])" "$1"; }
+          forge=$(tag yara-forge)
+          engine=$(tag yara-x)
+          branch="security/yara-$forge-$engine"
+
+          # One branch per combination: an existing one means this has been
+          # proposed already, and was merged, is open, or was turned down.
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "$branch exists already; nothing new to propose."
+            exit 0
+          fi
+
+          git switch --create "$branch"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/security/pins.json
+          git commit --quiet \
+            --message "Pin YARA Forge $forge and YARA-X $engine" \
+            --message "$SUMMARY"
+          git push --quiet origin "$branch"
+
+          {
+            echo "Proposes moving the YARA pins in \`.github/security/pins.json\`:"
+            echo
+            echo "$SUMMARY" | sed 's/^/- /'
+            echo
+            echo "Each is the newest release at least seven days old. Each SHA-256 is"
+            echo "the digest GitHub recorded for the asset, and the asset was"
+            echo "downloaded and checked against it before this was opened."
+            echo
+            echo "Security and CI were dispatched on this branch, and their results"
+            echo "show on this pull request. Merge once Security is green. If the"
+            echo "report says an accepted finding no longer matches anything,"
+            echo "remove it from \`.github/security/accepted-findings.toml\` here."
+          } > "$RUNNER_TEMP/body.md"
+
+          gh pr create --base main --head "$branch" \
+            --title "Pin YARA Forge $forge and YARA-X $engine" \
+            --body-file "$RUNNER_TEMP/body.md"
+          gh workflow run security.yml --ref "$branch"
+          gh workflow run ci.yml --ref "$branch"

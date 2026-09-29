@@ -1,12 +1,22 @@
 version: 2
 
+# Every pin in the repository that a tool can follow is followed from here.
+# The exception is a GitHub release download (YARA-X and its rules, pinned
+# in .github/security/pins.json), which .github/workflows/yara-forge-update.yml
+# follows instead.
+#
+# A seven-day cooldown throughout: a release is adopted once it is a week old,
+# which is long enough for a bad or compromised one to be noticed and pulled.
+# Security updates ignore the cooldown, which is what they should do.
+
 updates:
-  # Workflow actions are pinned to commit SHAs, which only move when
-  # something moves them. This is what moves them.
+  # Workflow actions, pinned to commit SHAs with the version in a comment.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
@@ -18,13 +28,37 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     versioning-strategy: increase-if-necessary
 
-  # Scanner versions for the security workflow, which are exact pins.
+  # Release tooling, at exact versions.
   - package-ecosystem: pip
-    directory: /.github/security
+    directory: /.github/release
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+
+  # Security tooling, hash-locked by pip-compile from each requirements.in.
+  - package-ecosystem: pip
+    directories:
+      - /.github/security/pip-audit
+      - /.github/security/malware
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       security-tools:
         patterns: ["*"]
+
+  # Scanner images, pinned by digest in one-line Dockerfiles.
+  - package-ecosystem: docker
+    directories:
+      - /.github/security/clamav
+      - /.github/security/semgrep
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
