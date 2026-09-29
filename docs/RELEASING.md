@@ -182,15 +182,26 @@ fails, rather than scanning with whatever the cache held. If a run
 fails at freshclam, it is usually ClamAV's mirrors rate-limiting the
 runner; rerun it later.
 
-`main` is protected. A pull request needs two checks to merge, "CI result"
-and "Security result", each pinned to the GitHub Actions app so no other
-integration can satisfy them. They are summary jobs that depend on every
-other job in their workflow and pass only if all of them succeeded, so
-renaming or adding a job, or moving a Python pin that names a matrix job,
-never needs the protection rule changed. A job added to either workflow
-does need adding to its result job's `needs`. Force pushes and deleting
-`main` are refused. Admins are not held to the checks, so the maintainer
-can still push directly; the checks then run after the push.
+Two repository rulesets (Settings > Rules > Rulesets) protect what a
+release depends on.
+
+"main" covers the default branch. A pull request needs two checks to
+merge, "CI result" and "Security result", each pinned to the GitHub
+Actions app so no other integration can satisfy them. They are summary
+jobs that depend on every other job in their workflow and pass only if all
+of them succeeded, so renaming or adding a job, or moving a Python pin that
+names a matrix job, never needs the ruleset changed. A job added to either
+workflow does need adding to its result job's `needs`. Force pushes and
+deleting the branch are refused.
+
+"release tags" covers `v*`. Only a repository admin can create, move or
+delete one, because pushing a tag and publishing a release from it is what
+sends a version to PyPI.
+
+Repository admins are the one bypass actor on both, so the maintainer can
+still push to `main` directly (the checks then run after the push) and tag
+releases as step 6 describes. To hold admins to the checks too, remove the
+bypass entry from the "main" ruleset, or set it to pull requests only.
 
 ## Limits worth knowing
 
