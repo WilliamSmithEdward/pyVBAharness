@@ -146,15 +146,13 @@ tests are meaningful; publishing runs on Linux because it only moves files.
 
 `security.yml` runs CodeQL (`security-extended`, over the Python and the
 workflows), Semgrep (`p/python`, `p/security-audit`, `p/secrets`,
-`p/github-actions`) and pip-audit, and fails on any finding.
-`malware-scan.yml` runs ClamAV and YARA-X, one job each, which build the
-wheel and sdist and scan them, their contents, and the source tree; its
-report job fails on any finding. Both run on pushes, pull requests and
-daily on their own, and `publish.yml` calls both as gates: the PyPI job
-needs them to pass, so a finding stops a release before anything is
-uploaded. Either way their reports are attached to the GitHub release as
-`security-report.md` and `malware-report.md`, so a blocked release says
-what blocked it. The dry-run path runs the scans too.
+`p/github-actions`) and pip-audit. `malware-scan.yml` runs ClamAV and
+YARA-X over the wheel and sdist, their contents, and the source tree. Each
+fails on any finding and runs on pushes, pull requests and daily, and
+`publish.yml` calls both as gates, so a finding stops a release before
+anything is uploaded. Either way `security-report.md` and
+`malware-report.md` are attached to the GitHub release, so a blocked
+release says what blocked it. The dry-run path runs the scans too.
 
 A finding is fixed, or recorded as false where the evidence supports it:
 
@@ -173,8 +171,8 @@ week old. `update-yara-rules.yml` does the same for YARA-X and its rules,
 which are GitHub release downloads Dependabot cannot follow: it opens a
 pull request pinning the new release and SHA-256, and dispatches Malware
 scan and CI on that branch, because a pull request opened by a workflow
-starts no workflows of its own. Merge it once Malware scan is green. Keep new actions
-pinned the same way: Semgrep's `github-actions-mutable-action-tag` rule
+starts no workflows of its own. Merge it once they are green. Keep new
+actions pinned the same way: Semgrep's `github-actions-mutable-action-tag` rule
 fails the build on a `@v4`.
 
 ClamAV brings its signatures up to date on every run, from a cache so that
@@ -186,13 +184,13 @@ runner; rerun it later.
 Two repository rulesets (Settings > Rules > Rulesets) protect what a
 release depends on.
 
-"main" covers the default branch. A pull request needs the gate checks to
-merge, "CI passed", "Security passed" and "Malware scan passed", each
-pinned to the GitHub Actions app so no other integration can satisfy them.
-They are gate jobs that depend on every other job in their workflow and
-pass only if all of them succeeded, so renaming or adding a job, or moving a Python pin that
-names a matrix job, never needs the ruleset changed. A job added to any
-workflow does need adding to its gate job's `needs`. Force pushes and
+"main" covers the default branch. A pull request needs "CI passed",
+"Security passed" and "Malware scan passed" to merge, each pinned to the
+GitHub Actions app so no other integration can satisfy them. Each gate job
+depends on every other job in its workflow and passes only if all of them
+succeeded, so renaming or adding a job, or moving a Python pin that names
+a matrix job, never needs the ruleset changed. A new job does need adding
+to its gate job's `needs`. Force pushes and
 deleting the branch are refused.
 
 "release tags" covers `v*`. Only a repository admin can create, move or
