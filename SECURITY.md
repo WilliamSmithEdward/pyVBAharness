@@ -65,6 +65,17 @@ Every push, every pull request, daily, and every release:
 - **YARA-X**, over the same files, with the full
   [YARA Forge](https://github.com/YARAHQ/yara-forge) rule package.
 
+Separately, and not as a gate, [fuzz.yml](.github/workflows/fuzz.yml) runs
+Atheris coverage-guided fuzzing daily, and on every change to them, against
+the two parsers that read text the harness does not control: the procedure
+signature parser, on arbitrary VBA source, and the worker protocol
+decoders, on arbitrary lines. A finding fails that workflow and becomes a
+regression seed in `tests/fuzz_corpus`, which the unit suite replays. Its
+first run found that a worker line nested deeply enough raised
+`RecursionError` rather than `ValueError`, which would have stopped the
+session reading the worker's output; the decoders now refuse it as a
+garbled line.
+
 Any finding fails the run. On a release it stops publishing before PyPI,
 and the reports are attached to the GitHub release as
 `security-report.md` and `malware-report.md` whether the scans passed or
@@ -106,6 +117,12 @@ install.
 Also on the repository: secret scanning with push protection, and
 Dependabot alerts and security updates for vulnerable dependencies.
 
+[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/WilliamSmithEdward/pyVBAharness)
+rates these practices on every change to main and weekly, and publishes
+the result the README badge shows. Some of its checks assume more than one
+maintainer, such as a second person approving every change, so a
+single-maintainer project cannot score full marks on them.
+
 Releases reach PyPI through Trusted Publishing, so no upload token exists
 to be stolen, and PyPI records an attestation tying each file to the
 workflow run that built it.
@@ -123,4 +140,7 @@ pip download pyvbaharness --no-deps -d check
 gh attestation verify check/<file> --owner WilliamSmithEdward
 ```
 
-The output names the commit and workflow run that built the file.
+The output names the commit and workflow run that built the file. The
+signed bundle is also attached to the GitHub release as
+`pyvbaharness-<version>.sigstore.json`, so the check works without asking
+GitHub for it: add `--bundle pyvbaharness-<version>.sigstore.json`.
