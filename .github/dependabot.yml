@@ -20,6 +20,7 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+        update-types: [minor, patch]
 
   # The package's own dependencies. This is a library, so a floor in
   # pyproject.toml is a compatibility claim, not a pin: raise it only when
@@ -27,21 +28,28 @@ updates:
   - package-ecosystem: pip
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     cooldown:
       default-days: 7
+      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, pyvbareference, pyvbaanalysis, pyvbaharness, xlide-mcp]
     versioning-strategy: increase-if-necessary
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   # Release and security tooling, hash-locked by uv from each <purpose>.in.
   - package-ecosystem: pip
     directory: /.github/requirements
     schedule:
-      interval: weekly
+      interval: daily
     cooldown:
       default-days: 7
+      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, pyvbareference, pyvbaanalysis, pyvbaharness, xlide-mcp]
     groups:
       tools:
         patterns: ["*"]
+        update-types: [minor, patch]
 
   # Scanner images, pinned by digest in one-line Dockerfiles.
   - package-ecosystem: docker
@@ -52,3 +60,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    groups:
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
