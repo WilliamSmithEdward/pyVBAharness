@@ -31,7 +31,7 @@ updates:
       interval: daily
     cooldown:
       default-days: 7
-      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, pyvbareference, pyvbaanalysis, pyvbaharness, xlide-mcp]
+      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, vba-reference, pyvbaanalysis, pyvbaharness, xlide-mcp]
     versioning-strategy: increase-if-necessary
     groups:
       minor-and-patch:
@@ -45,7 +45,7 @@ updates:
       interval: daily
     cooldown:
       default-days: 7
-      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, pyvbareference, pyvbaanalysis, pyvbaharness, xlide-mcp]
+      exclude: [pyopenvba, pyofficeeditor, pyprettyvba, vba-reference, pyvbaanalysis, pyvbaharness, xlide-mcp]
     groups:
       tools:
         patterns: ["*"]
