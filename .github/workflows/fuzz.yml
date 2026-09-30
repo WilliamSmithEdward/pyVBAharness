@@ -1,0 +1,66 @@
+name: Fuzz
+
+# Coverage-guided fuzzing, with Atheris (fuzz/fuzz_harness.py), of the two
+# parsers that read text the harness does not control: the procedure-signature
+# parser (the user's VBA) and the worker protocol decoders. Each target runs
+# from its seeds in tests/fuzz_corpus/<target>: a minute on a change to them,
+# five minutes daily. The package imports Windows modules, so the harness
+# loads the two pure modules from the tree and nothing else is installed.
+# A finding fails the run and is kept as the crash artifact; add it to the
+# corpus as a regression seed with the fix. This is not a required check, so
+# a finding in code a pull request did not touch does not block it.
+
+on:
+  push:
+    branches: [main]
+    paths: [src/pyvbaharness/vbasig.py, src/pyvbaharness/protocol.py, fuzz/**, tests/fuzz_corpus/**, .github/requirements/fuzz.*, .github/workflows/fuzz.yml]
+  pull_request:
+    paths: [src/pyvbaharness/vbasig.py, src/pyvbaharness/protocol.py, fuzz/**, tests/fuzz_corpus/**, .github/requirements/fuzz.*, .github/workflows/fuzz.yml]
+  schedule:
+    - cron: '5 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [vbasig, protocol]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+
+      - name: Install Atheris
+        run: python -m pip install --require-hashes -r .github/requirements/fuzz.txt
+
+      - name: Fuzz
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_TO_RUN: ${{ github.event_name == 'schedule' && '300' || '60' }}
+        run: |
+          # The fuzzer adds what it learns to the first corpus directory, so
+          # it works on a copy and the checked-in seeds stay as they are.
+          mkdir -p "$RUNNER_TEMP/corpus" findings
+          cp -r "tests/fuzz_corpus/$TARGET/." "$RUNNER_TEMP/corpus/"
+          python fuzz/fuzz_harness.py "$TARGET" \
+            -max_total_time="$SECONDS_TO_RUN" -timeout=10 -rss_limit_mb=2048 \
+            -artifact_prefix=findings/ "$RUNNER_TEMP/corpus"
+
+      - name: Keep the finding
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-finding-${{ matrix.target }}
+          path: findings/
+          if-no-files-found: ignore

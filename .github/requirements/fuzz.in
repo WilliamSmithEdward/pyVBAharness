@@ -1,0 +1,6 @@
+# Fuzzing for the Fuzz workflow: Atheris, Google's coverage-guided fuzzer
+# for Python, which ships Linux wheels for CPython 3.12 to 3.14. The fuzz
+# targets load their modules from the source tree, so nothing else is needed.
+#   uv pip compile fuzz.in --universal --generate-hashes --python-version 3.12 -o fuzz.txt
+# Dependabot proposes each new release.
+atheris==3.1.0
