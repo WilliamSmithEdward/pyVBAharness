@@ -16,28 +16,18 @@
 #                but name files: an accepted finding should not grow.
 #   reason       why this is not a real detection, with the evidence
 #   remove_when  the change after which the entry should no longer match
-
-[[finding]]
-engine = "yara-x"
-match = "SIGNATURE_BASE_Powershell_Case_Anomaly"
-paths = [
-  "repo/docs/troubleshooting.md",
-  "repo/docs/IMPLEMENTATION_GUIDE.md",
-]
-reason = """
-The rule looks for obfuscated PowerShell by counting "powershell" case
-insensitively and firing when that exceeds the count of its seven ordinary
-spellings. These files contain only the lowercase ```powershell Markdown
-fence tag, which is one of those spellings, so the rule should not fire.
-
-It fires because of an engine fault in YARA-X 1.20.0. When two rules
-declare an identical pattern and the first bounds filesize, a file outside
-that bound hides the pattern's matches from the second rule too. Here
-SEKOIA_Apt_Kimsuky_Sharptongue_Vbslauncher_Strings comes first and declares
-"powershell" under filesize < 10KB. These files are over 10 KB, so the
-anomaly rule's count of the exact lowercase spelling reads zero. Measured
-2026-09-29: 1.21.0 is correct, and so is 1.20.0 with the rule alone or with
-the rules in the other order. Reported with a two-rule repro as
-https://github.com/VirusTotal/yara-x/issues/784.
-"""
-remove_when = "YARA-X 1.21.0 or later is pinned in .github/security/pins.json"
+#
+# Entries take this form:
+#
+#   [[finding]]
+#   engine = "yara-x"
+#   match = "RULE_IDENTIFIER"
+#   paths = ["repo/path/to/file"]
+#   reason = """..."""
+#   remove_when = "..."
+#
+# None are accepted at present. The last was
+# SIGNATURE_BASE_Powershell_Case_Anomaly on two documentation files, caused
+# by a YARA-X 1.20.0 engine fault
+# (https://github.com/VirusTotal/yara-x/issues/784). It went when 1.21.0 was
+# pinned, which scans this repository with no findings.

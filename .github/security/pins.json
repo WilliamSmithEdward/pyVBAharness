@@ -1,11 +1,11 @@
 {
   "yara-x": {
     "repo": "VirusTotal/yara-x",
-    "tag": "v1.20.0",
+    "tag": "v1.21.0",
     "asset_template": "yara-x-{tag}-x86_64-unknown-linux-gnu.tar.gz",
-    "asset": "yara-x-v1.20.0-x86_64-unknown-linux-gnu.tar.gz",
-    "sha256": "cabb8df46492fff59c51261302c71ed9cb2cef393d3f0ca560801a34a8e24cbe",
-    "published": "2026-08-24"
+    "asset": "yara-x-v1.21.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "01585181e8979e36ac10ab123fcf8921cf8ba879bf942916413e091e18d64852",
+    "published": "2026-09-29"
   },
   "yara-forge": {
     "repo": "YARAHQ/yara-forge",

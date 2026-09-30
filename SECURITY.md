@@ -75,9 +75,7 @@ A malware finding known to be false is listed, with the evidence, in
 [`.github/security/accepted-findings.toml`](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/.github/security/accepted-findings.toml).
 Only the named rule in the named files is accepted. An entry without a
 reason fails the scan, and one that stops matching is reported so it can be
-removed. There is one at present: a YARA rule that fires on two
-documentation files because of a YARA-X 1.20.0 engine fault, not because of
-their content, described in full in that file.
+removed. None are accepted at present.
 
 ## Pinning
 

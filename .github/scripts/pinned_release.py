@@ -114,6 +114,12 @@ def propose(cooldown_days: int) -> int:
         if tag == pin["tag"]:
             print(f"{name}: {tag} is current")
             continue
+        # A pin can be newer than anything past the cooldown, when a release
+        # was adopted early on purpose. Never propose going backwards.
+        if release["published_at"][:10] <= pin["published"]:
+            print(f"{name}: pinned {pin['tag']} ({pin['published']}) is newer "
+                  f"than the newest eligible release, {tag}; keeping it")
+            continue
         asset_name = pin["asset_template"].format(tag=tag)
         asset = next((a for a in release.get("assets", [])
                       if a["name"] == asset_name), None)
