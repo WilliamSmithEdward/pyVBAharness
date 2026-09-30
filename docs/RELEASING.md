@@ -100,8 +100,8 @@ accidental release.
    ```
 
 5. Commit, then dry-run the build: Actions > Publish > Run workflow. A
-   manual run stops after the build job without publishing anything, and
-   leaves the distributions as a downloadable artifact.
+   manual run is always a dry run: it publishes nothing, and leaves the
+   distributions and both reports as the `release-preview` artifact.
 
    Download it and test the exact file that would be published, on a machine
    that has Excel:
