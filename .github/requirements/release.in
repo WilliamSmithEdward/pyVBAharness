@@ -7,5 +7,8 @@
 #
 # Regenerate from .github/requirements/:
 #   uv pip compile release.in --universal --generate-hashes --python-version 3.12 -o release.txt
+# setuptools is the build backend: builds run with --no-isolation, so it
+# comes from this lock rather than a fresh download.
 build==1.6.1
 twine==7.0.0
+setuptools==84.0.0

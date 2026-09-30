@@ -71,7 +71,7 @@ jobs:
         # build and twine, hash-pinned in .github/requirements/release.txt.
         run: |
           python -m pip install --require-hashes -r .github/requirements/release.txt
-          python -m build
+          python -m build --no-isolation
           python -m twine check dist/*
 
       - name: Verify wheel contents

@@ -4,9 +4,11 @@ name: Publish
 # PyPI Trusted Publishing (OIDC): no API token is stored in this
 # repository. See docs/RELEASING.md for the one-time PyPI setup.
 #
-# The manual trigger builds and verifies without publishing, so a release
-# candidate can be downloaded from the run and tested locally against real
-# Excel before it is tagged.
+# Started by hand, this is a dry run unless dry_run is unticked: it builds,
+# verifies, runs the scans and assembles the release files exactly as a
+# release would, and uploads them as the release-preview artifact instead of
+# publishing anything, so a release candidate can be downloaded from the run
+# and tested locally against real Excel before it is tagged.
 #
 # The security and malware scan workflows run as gates: any finding stops
 # the release before PyPI, and their reports are attached to the GitHub
@@ -16,6 +18,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, scan and assemble the release, but publish nothing
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -60,7 +67,7 @@ jobs:
 
       - name: Build distributions
         run: |
-          python -m build
+          python -m build --no-isolation
           python -m twine check dist/*
 
       - name: Verify the wheel
@@ -106,7 +113,7 @@ jobs:
     # and malware scan runs. A manual run stops after the build job, leaving an artifact to
     # download and test.
     name: Publish to PyPI
-    if: github.event_name == 'release'
+    if: ${{ github.event_name == 'release' && !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
     needs: [build, security, malware-scan]
     runs-on: ubuntu-24.04
     environment:
@@ -125,12 +132,18 @@ jobs:
   attach-reports:
     # Runs whether or not the scans passed: a release blocked by a finding
     # should carry the reports that blocked it.
+    # On a dry run it keeps the reports, with the distributions, as the
+    # release-preview artifact instead.
     name: Attach the reports
-    if: always() && github.event_name == 'release' && needs.security.result != 'skipped'
-    needs: [security, malware-scan]
+    if: >-
+      ${{ always() && needs.security.result != 'skipped'
+      && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.dry_run)) }}
+    needs: [build, security, malware-scan]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -140,7 +153,23 @@ jobs:
         with:
           name: malware-report
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.DRY_RUN == 'true'
+        with:
+          name: distributions
+          path: dist/
+      - name: Keep what the release would carry
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-preview
+          path: |
+            dist/
+            security-report.md
+            malware-report.md
+          if-no-files-found: error
       - name: Attach to the release
+        if: env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
