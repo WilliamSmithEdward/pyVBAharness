@@ -1,8 +1,8 @@
 # ClamAV engine for the malware scan in .github/workflows/malware-scan.yml,
 # pinned by digest; Dependabot proposes version and digest bumps.
 #
-# The _base variant ships without signature databases. Signatures are not
-# pinned: they change many times a day, so freshclam brings them up to date
-# on every run and checks their signatures, and the run's report records
-# which database versions were used.
-FROM clamav/clamav:1.5.4_base@sha256:7769870154c74ce31b0047dd8771e81f7c4269278bc005782e9e419e4922c73d
+# The same image every repository uses. Its bundled signatures are not used:
+# the scan mounts its own database directory over /var/lib/clamav, and
+# freshclam brings it up to date on every run and checks its signatures. The
+# run's report records which database versions were used.
+FROM clamav/clamav:1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
