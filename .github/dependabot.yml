@@ -2,7 +2,7 @@ version: 2
 
 # Every pin in the repository that a tool can follow is followed from here.
 # The exception is a GitHub release download (YARA-X and its rules, pinned
-# in .github/security/pins.json), which .github/workflows/update-yara-rules.yml
+# in .github/security/yara.json), which .github/workflows/update-yara-rules.yml
 # follows instead.
 #
 # A seven-day cooldown throughout: a release is adopted once it is a week old,

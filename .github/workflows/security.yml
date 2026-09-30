@@ -20,7 +20,7 @@ name: Security
 # runners by OS release and Python by exact version; Semgrep and ClamAV by
 # image digest (.github/security/*/Dockerfile); Python tools by hash
 # (.github/requirements/*.txt); YARA-X and its rules by release and
-# SHA-256 (.github/security/pins.json). Dependabot moves the actions, images
+# SHA-256 (.github/security/yara.json). Dependabot moves the actions, images
 # and tools, and update-yara-rules.yml moves the release downloads. Nothing
 # can follow runner labels or Python versions; move those by hand, as the
 # note on ci.yml's matrix describes. Signatures are the exception: ClamAV's
