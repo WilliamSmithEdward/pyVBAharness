@@ -61,8 +61,21 @@ def encode_command(cid: int, name: str, params: dict[str, Any]) -> str:
                       ensure_ascii=False)
 
 
+def _loads(text: str) -> Any:
+    """json.loads, with nesting too deep to parse raised as ValueError.
+
+    Both readers treat ValueError as a garbled line. json.loads raises
+    RecursionError on a document nested deeply enough, which would get past
+    them and stop the reader.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError:
+        raise ValueError("the line nests too deeply to parse") from None
+
+
 def decode_command(line: str) -> dict[str, Any]:
-    parsed = json.loads(line)
+    parsed = _loads(line)
     if (not isinstance(parsed, dict)
             or not isinstance(parsed.get("cmd"), str)
             or not isinstance(parsed.get("cid"), int)):
@@ -88,7 +101,7 @@ def decode_event(line: str) -> dict[str, Any] | None:
     """
     if not line.startswith(EVENT_PREFIX):
         return None
-    parsed = json.loads(line[len(EVENT_PREFIX):])
+    parsed = _loads(line[len(EVENT_PREFIX):])
     if not isinstance(parsed, dict) or not isinstance(parsed.get("kind"), str):
         return None
     return parsed

@@ -22,6 +22,12 @@ class TestCommands:
             with pytest.raises(ValueError):
                 protocol.decode_command(bad)
 
+    def test_nesting_too_deep_is_a_malformed_line(self):
+        # json.loads raised RecursionError here, which the worker's
+        # `except ValueError` did not catch.
+        with pytest.raises(ValueError, match="nests too deeply"):
+            protocol.decode_command("[" * 100_000 + "]" * 100_000)
+
 
 class TestEvents:
     def test_roundtrip(self):
@@ -32,6 +38,12 @@ class TestEvents:
 
     def test_plain_lines_pass_through(self):
         assert protocol.decode_event("hello world") is None
+
+    def test_nesting_too_deep_is_a_malformed_line(self):
+        # json.loads raised RecursionError here, which got past the session
+        # reader's `except ValueError` and stopped it reading the worker.
+        with pytest.raises(ValueError, match="nests too deeply"):
+            protocol.decode_event(protocol.EVENT_PREFIX + "[" * 100_000 + "]" * 100_000)
 
     def test_structurally_wrong_json_rejected(self):
         assert protocol.decode_event(protocol.EVENT_PREFIX + '["x"]') is None
