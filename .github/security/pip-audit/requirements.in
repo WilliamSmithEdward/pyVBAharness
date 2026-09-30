@@ -1,8 +1,0 @@
-# Input for requirements.txt, which pins every package with hashes.
-# Resolve it with the Python version the dependencies job runs (3.12): some
-# of pip-audit's dependencies are conditional on it, and a lock resolved
-# under 3.14 left out typing_extensions, which 3.12 needs. None depend on
-# the platform, so a Linux resolve installs on the Windows runner. Regenerate
-# with:
-#   pip-compile --generate-hashes --allow-unsafe --no-emit-index-url --strip-extras requirements.in
-pip-audit==2.10.1

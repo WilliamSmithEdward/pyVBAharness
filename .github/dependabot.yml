@@ -32,25 +32,15 @@ updates:
       default-days: 7
     versioning-strategy: increase-if-necessary
 
-  # Release tooling, at exact versions.
+  # Release and security tooling, hash-locked by uv from each <purpose>.in.
   - package-ecosystem: pip
-    directory: /.github/release
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-
-  # Security tooling, hash-locked by pip-compile from each requirements.in.
-  - package-ecosystem: pip
-    directories:
-      - /.github/security/pip-audit
-      - /.github/security/malware
+    directory: /.github/requirements
     schedule:
       interval: weekly
     cooldown:
       default-days: 7
     groups:
-      security-tools:
+      tools:
         patterns: ["*"]
 
   # Scanner images, pinned by digest in one-line Dockerfiles.

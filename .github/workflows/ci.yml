@@ -68,10 +68,9 @@ jobs:
           python-version: "3.12.10"  # newest 3.12 with a Windows build; see the matrix note
 
       - name: Build distributions
-        # Pinned in .github/release/requirements.txt, which says why there
-        # are no hashes.
+        # build and twine, hash-pinned in .github/requirements/release.txt.
         run: |
-          python -m pip install -r .github/release/requirements.txt
+          python -m pip install --require-hashes -r .github/requirements/release.txt
           python -m build
           python -m twine check dist/*
 

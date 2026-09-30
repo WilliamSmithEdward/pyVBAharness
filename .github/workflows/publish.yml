@@ -34,10 +34,10 @@ jobs:
           python-version: "3.12.10"  # newest 3.12 with a Windows build; see ci.yml's matrix note
 
       - name: Install
-        # build and twine from .github/release/requirements.txt; the test
+        # build and twine from .github/requirements/release.txt; the test
         # dependencies from their declared ranges, as in ci.yml.
         run: |
-          python -m pip install -r .github/release/requirements.txt
+          python -m pip install --require-hashes -r .github/requirements/release.txt
           python -m pip install -e ".[dev,fuzz]"
 
       - name: Unit tests

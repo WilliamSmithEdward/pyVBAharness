@@ -1,0 +1,11 @@
+# build and twine, which ci.yml and publish.yml use to build the wheel and
+# sdist and check their metadata on Windows. Compiled to release.txt with
+# exact versions and hashes; the universal resolve keeps keyring's
+# Windows-only dependencies (pywin32-ctypes) behind their markers, so the
+# lock installs on Windows and Linux alike. Dependabot proposes each new
+# release.
+#
+# Regenerate from .github/requirements/:
+#   uv pip compile release.in --universal --generate-hashes --python-version 3.12 -o release.txt
+build==1.6.1
+twine==7.0.0

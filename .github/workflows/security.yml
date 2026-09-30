@@ -17,7 +17,7 @@ name: Security
 # Pinning: actions by commit SHA with the version in a trailing comment;
 # runners by OS release and Python by exact version; Semgrep and ClamAV by
 # image digest (.github/security/*/Dockerfile); Python tools by hash
-# (.github/security/*/requirements.txt); YARA-X and its rules by release and
+# (.github/requirements/*.txt); YARA-X and its rules by release and
 # SHA-256 (.github/security/pins.json). Dependabot moves the actions, images
 # and tools, and update-yara-rules.yml moves the release downloads. Nothing
 # can follow runner labels or Python versions; move those by hand, as the
@@ -134,7 +134,9 @@ jobs:
           python-version: "3.12.10"  # newest 3.12 with a Windows build; see ci.yml's matrix note
 
       - name: Install
-        run: python -m pip install --require-hashes --no-deps -r .github/security/pip-audit/requirements.txt
+        # --no-deps: the lock already pins every dependency with a hash, so
+        # pip installs exactly the lock and resolves nothing beyond it.
+        run: python -m pip install --require-hashes --no-deps -r .github/requirements/pip-audit.txt
 
       - name: Audit runtime dependencies
         # --strict also fails when a dependency cannot be audited at all,
