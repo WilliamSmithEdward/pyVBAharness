@@ -1,4 +1,4 @@
-﻿name: Publish
+name: Publish
 
 # Publishing runs when a GitHub release is published. Authentication is
 # PyPI Trusted Publishing (OIDC): no API token is stored in this
