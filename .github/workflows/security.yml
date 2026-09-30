@@ -104,10 +104,23 @@ jobs:
               --sarif-output=semgrep.sarif \
               --json-output=semgrep.json
 
-      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+      - name: Drop findings suppressed in source
+        # Semgrep writes a "# nosemgrep" finding into the SARIF, marked with
+        # an inSource suppression, and code scanning raises an open alert
+        # for it regardless. The suppression comment in the code is the
+        # record of that decision, and --error above already honours it, so
+        # code scanning gets the same set the gate judged: measured
+        # 2026-09-30, pinned_release.py:52 passed the gate and stayed an
+        # open alert. The full SARIF is still kept as an artifact.
         if: always() && hashFiles('semgrep.sarif') != ''
+        run: >-
+          jq '.runs[].results |= map(select((.suppressions // []) | length == 0))'
+          semgrep.sarif > semgrep-unsuppressed.sarif
+
+      - uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        if: always() && hashFiles('semgrep-unsuppressed.sarif') != ''
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: semgrep-unsuppressed.sarif
           category: semgrep
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
