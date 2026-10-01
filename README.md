@@ -1,12 +1,13 @@
 ﻿# pyVBAharness
 
+[![PyPI version](https://img.shields.io/pypi/v/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
+[![Python versions](https://img.shields.io/pypi/pyversions/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
+[![Downloads](https://img.shields.io/pypi/dm/pyvbaharness)](https://pypistats.org/packages/pyvbaharness)
 [![CI](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml)
 [![Security](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml)
 [![Malware scan](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/WilliamSmithEdward/pyVBAharness/badge)](https://scorecard.dev/viewer/?uri=github.com/WilliamSmithEdward/pyVBAharness)
-[![PyPI](https://img.shields.io/pypi/v/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
-[![Python](https://img.shields.io/pypi/pyversions/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
-[![License: MIT](https://img.shields.io/github/license/WilliamSmithEdward/pyVBAharness)](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/LICENSE)
 
 Run VBA in desktop Excel, Word, PowerPoint and Access from Python, under a
 supervisor that enforces a deadline on every call.
