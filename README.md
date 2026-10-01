@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
 [![Python versions](https://img.shields.io/pypi/pyversions/pyvbaharness)](https://pypi.org/project/pyvbaharness/)
-[![Downloads](https://img.shields.io/pypi/dm/pyvbaharness)](https://pypistats.org/packages/pyvbaharness)
+[![Downloads](https://static.pepy.tech/badge/pyvbaharness/month)](https://pepy.tech/projects/pyvbaharness)
 [![CI](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/ci.yml)
 [![Security](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/security.yml)
 [![Malware scan](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml/badge.svg?branch=main)](https://github.com/WilliamSmithEdward/pyVBAharness/actions/workflows/malware-scan.yml)
