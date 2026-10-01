@@ -105,7 +105,8 @@ A malware finding is fixed, or accepted with a written reason in
 An entry matches the engine, the exact signature or rule name, and the
 paths it names, and must say why the finding is false and when the entry
 can go; an entry without a reason fails the scan. An entry that no longer
-matches is noted in the scan output; it does not yet fail the report.
+matches anything fails the report, naming the entry and its reason, until
+it is removed.
 CodeQL has no accepted list: any finding fails Security. A Semgrep finding
 can be accepted only by a `# nosemgrep: <rule-id>` comment at the line,
 with a comment saying why. zizmor keeps its exceptions in

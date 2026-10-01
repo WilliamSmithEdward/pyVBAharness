@@ -160,7 +160,7 @@ A finding is fixed, or recorded as false where the evidence supports it:
 - CodeQL: a dismissal on the alert in the Security tab, with a reason.
 - ClamAV and YARA-X: an entry in `.github/security/accepted-findings.toml`
   naming the rule, the files, the evidence, and what would let the entry
-  be removed. The scan refuses an entry without a reason, and reports one
+  be removed. The scan refuses an entry without a reason, and fails on one
   that no longer matches anything.
 
 There is no threshold to lower, deliberately.
