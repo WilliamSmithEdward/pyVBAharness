@@ -3,8 +3,8 @@
 # A ClamAV or YARA-X finding fails the Security workflow and blocks a release
 # unless it is listed here. An entry must say what it matches, where, why it
 # is not a real detection, and what would let it be removed. The scan refuses
-# an entry without a reason, reports an entry that no longer matches
-# anything so it can be deleted, and never treats a listed finding in any
+# an entry without a reason, fails on an entry that no longer matches
+# anything until it is deleted, and never treats a listed finding in any
 # other file as accepted.
 #
 # Fields:

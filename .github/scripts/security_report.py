@@ -247,7 +247,8 @@ def malware_report(malware_json: str, output: str) -> int:
                           "`.github/security/accepted-findings.toml`.")
         for match in data["unused_acceptances"]:
             detail.append(f"- Accepted finding `{match}` no longer matches "
-                          "anything and can be removed.")
+                          "anything, which fails the report until it is "
+                          "removed.")
         for problem in data["problems"]:
             detail.append(f"- {problem}")
     else:
