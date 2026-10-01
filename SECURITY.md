@@ -2,34 +2,27 @@
 
 ## Reporting a vulnerability
 
-Report it privately, through
-[GitHub's private vulnerability reporting](https://github.com/WilliamSmithEdward/pyVBAharness/security/advisories/new).
-Please do not open a public issue for anything you think is exploitable.
+Report a vulnerability privately, not in a public issue or pull request:
+[open a private report](https://github.com/WilliamSmithEdward/pyVBAharness/security/advisories/new).
+Only the maintainer sees it. Include the `pyvbaharness` version, the
+Office and Windows versions, what you did, what happened and what should
+have happened, and the smallest file or steps that show it, with
+credentials and private data removed. A reproduction script is the most
+useful thing you can include; the harness is easy to drive from a few
+lines of Python, so most problems can be shown that way.
 
-A useful report says which version you ran, what you did, what happened,
-and what should have happened. A reproduction script is the most useful
-thing you can include; the harness is easy to drive from a few lines of
-Python, so most problems can be shown that way.
+A confirmed vulnerability is fixed in a release on PyPI, and the advisory
+is published with it, crediting you unless you ask otherwise.
 
 ## Supported versions
 
-Only the latest release. Fixes ship as a new release rather than being
-backported, so upgrading is the fix.
+Only the latest release on PyPI receives security fixes. Older releases are
+not maintained separately; update when a fix ships.
 
-## What counts
+## Scope
 
 The harness does a few things on your machine that are worth knowing
 about, and they mark out what is and is not a vulnerability.
-
-**It runs VBA.** That is its purpose. Running VBA you do not trust through
-the harness is running code you do not trust, the same as opening a
-macro-enabled document from a stranger. The harness contains a hang or a
-dialog; it does not sandbox what the code does.
-
-**It needs "Trust access to the VBA project object model".** While that
-setting is on, any code running as your Windows user can modify VBA
-projects, not only the harness. That is why it belongs on a development
-machine and not a shared server. The harness does not turn it on for you.
 
 **It terminates processes.** When a run exceeds its deadline, the harness
 kills the Office process it started, identified by process ID plus process
@@ -49,85 +42,120 @@ kills something else is in scope.
 
 **It makes no network connections** and sends no telemetry.
 
-## What is checked automatically
+### Using it safely
 
-Every push, every pull request, daily, and every release:
+**It runs VBA.** That is its purpose. Running VBA you do not trust through
+the harness is running code you do not trust, the same as opening a
+macro-enabled document from a stranger. The harness contains a hang or a
+dialog; it does not sandbox what the code does.
 
-- **CodeQL**, with the `security-extended` queries, over the Python source
-  and over the GitHub Actions workflows.
-- **Semgrep**, with the `p/python`, `p/security-audit`, `p/secrets` and
-  `p/github-actions` rulesets.
-- **pip-audit**, for known vulnerabilities in the runtime dependencies.
-- **ClamAV**, over the source tree, the built wheel and sdist, and their
-  contents, with the official databases plus the free Sanesecurity,
-  InterServer and URLhaus feeds. Signatures are brought up to date on
-  every run, and their versions are recorded in the report.
-- **YARA-X**, over the same files, with the full
-  [YARA Forge](https://github.com/YARAHQ/yara-forge) rule package.
+**It needs "Trust access to the VBA project object model".** While that
+setting is on, any code running as your Windows user can modify VBA
+projects, not only the harness. That is why it belongs on a development
+machine and not a shared server. The harness does not turn it on for you.
 
-Separately, and not as a gate, [fuzz.yml](.github/workflows/fuzz.yml) runs
-Atheris coverage-guided fuzzing daily, and on every change to them, against
-the two parsers that read text the harness does not control: the procedure
-signature parser, on arbitrary VBA source, and the worker protocol
-decoders, on arbitrary lines. A finding fails that workflow and becomes a
-regression seed in `tests/fuzz_corpus`, which the unit suite replays. Its
-first run found that a worker line nested deeply enough raised
-`RecursionError` rather than `ValueError`, which would have stopped the
-session reading the worker's output; the decoders now refuse it as a
-garbled line.
+## How the code is checked
 
-Any finding fails the run. On a release it stops publishing before PyPI,
-and the reports are attached to the GitHub release as
-`security-report.md` and `malware-report.md` whether the scans passed or
-not, so a blocked release
-says what blocked it.
+Three workflows check every pull request and every push to `main`, and
+their gates decide whether a change can merge: **CI passed**,
+**Security passed** and **Malware scan passed**. A gate passes only when
+every job before it did, and any unexpected finding fails it, whatever its
+severity. Security and Malware scan also run daily, and again from the
+Publish workflow for every release.
 
-A malware finding known to be false is listed, with the evidence, in
-[`.github/security/accepted-findings.toml`](https://github.com/WilliamSmithEdward/pyVBAharness/blob/main/.github/security/accepted-findings.toml).
-Only the named rule in the named files is accepted. An entry without a
-reason fails the scan, and one that stops matching is reported so it can be
-removed. None are accepted at present.
+- **Code:** CodeQL with the `security-extended` queries, for Python and the
+  GitHub Actions workflows, and Semgrep with the `p/python`,
+  `p/security-audit`, `p/secrets` and `p/github-actions` rule sets. Results
+  go to the repository's code scanning.
+- **Workflows:** zizmor audits the GitHub Actions workflows; a finding fails
+  Security.
+- **Dependencies:** pip-audit, on Windows, over the package's runtime
+  dependencies as a user installing it today would resolve them. The only
+  one, pywin32, installs only on Windows. A dependency that cannot be
+  audited fails the job as well.
+- **Malware:** ClamAV, with signatures freshclam fetches and verifies on
+  every run, and YARA-X, with the YARA Forge rules pinned to a release and
+  its SHA-256, scan the checkout (without `.git`), the built wheel and sdist,
+  and their unpacked contents. ClamAV adds the free Sanesecurity,
+  InterServer and URLhaus feeds to the official databases, and the scan
+  fails if an official database or the unofficial feeds are missing. YARA-X
+  runs the full YARA Forge pack. The report records the signature and rule
+  versions used.
+- **Fuzzing:** Atheris fuzzes the two parsers that read text the harness
+  does not control (`fuzz/fuzz_harness.py`): the procedure signature parser,
+  on arbitrary VBA source, and the worker protocol decoders, on arbitrary
+  lines. Each starts from its seeds in `tests/fuzz_corpus`, which the unit
+  suite also replays. The Fuzz workflow runs on every change to those two
+  modules, the fuzz target or its corpus, for a minute per target, and
+  daily for five. It is not a gate: a finding becomes a regression test
+  with its fix. Its first run found that a worker line nested deeply enough
+  raised `RecursionError` rather than `ValueError`, which would have stopped
+  the session reading the worker's output; the decoders now refuse it as a
+  garbled line.
+- **OpenSSF Scorecard** rates the repository's security practices on every
+  change to `main` and weekly, and the README badge shows the result.
+  Some of its checks assume more than one maintainer, such as a second
+  person approving every change, so a single-maintainer project cannot
+  score full marks on them.
 
-## Pinning
+## Accepted findings
 
-Everything the scans and builds depend on is pinned, and every pin has
-something that moves it:
+A malware finding is fixed, or accepted with a written reason in
+[.github/security/accepted-findings.toml](.github/security/accepted-findings.toml).
+An entry matches the engine, the exact signature or rule name, and the
+paths it names, and must say why the finding is false and when the entry
+can go; an entry without a reason fails the scan. An entry that no longer
+matches is noted in the scan output; it does not yet fail the report.
+CodeQL has no accepted list: any finding fails Security. A Semgrep finding
+can be accepted only by a `# nosemgrep: <rule-id>` comment at the line,
+with a comment saying why. zizmor keeps its exceptions in
+`.github/zizmor.yml` or inline beside the line they excuse, each with its
+reason.
 
-| What | Pinned by | Moved by |
-| --- | --- | --- |
-| Workflow actions | commit SHA | Dependabot |
-| ClamAV and Semgrep | image digest | Dependabot |
-| Python tools for the scans | exact version and hash | Dependabot |
-| `build` and `twine` for releases | exact version | Dependabot |
-| YARA-X and its rules | release and SHA-256 | a weekly workflow |
-| Runners and Python | OS release, exact version | by hand |
+The current entries: no malware finding is accepted and no `nosemgrep`
+comment is in use. zizmor has `self-repository` turned off in
+[.github/zizmor.yml](.github/zizmor.yml) until GitHub's documentation
+confirms the `$/` self-repository syntax for reusable workflows called from
+`publish.yml`.
 
-Dependabot and the weekly workflow both wait until a release is a week old
-before proposing it. The weekly workflow takes each SHA-256 from the digest
-GitHub recorded for the release asset, opens a pull request, and runs the
-malware scan on it before it can be merged.
+## Pinning and updates
 
-Two inputs are deliberately left to change on their own: ClamAV's
-signatures and Semgrep's registry rulesets, which change many times a day.
-The engines that read them are pinned. The test suite's own dependencies
-resolve from the ranges `pyproject.toml` declares, because the point of
-that test matrix is to show the package works with what a user would
-install.
+Everything the workflows run is pinned: actions to full commit SHAs,
+runners to named OS releases, scanner images to digests, Python tools to
+hash-locked lock files, and the YARA-X engine and YARA Forge rules to a
+release and its SHA-256. ClamAV's signatures change too often to pin, so
+freshclam fetches and verifies them on every run. The unofficial ClamAV
+feeds and Semgrep's registry rule sets are also fetched fresh on every run,
+and the engines that read them are pinned. Runner labels and
+Python versions are moved by hand. The test suite's own dependencies
+resolve from the ranges `pyproject.toml` declares, because the point of the
+test matrix is to show the package works with what a user would install.
 
-Also on the repository: secret scanning with push protection, and
-Dependabot alerts and security updates for vulnerable dependencies.
+Dependabot proposes updates to the GitHub Actions, the scanner images, the
+package's dependencies in `pyproject.toml` and the lock files in
+`.github/requirements` once a version is a week old, and at once for a
+security advisory. The Update YARA rules workflow proposes new YARA pins
+each week. A minor or patch update, and the YARA pull request, merges
+itself once CI, Security and Malware scan pass; a third-party major version
+waits for review.
 
-[OpenSSF Scorecard](https://scorecard.dev/viewer/?uri=github.com/WilliamSmithEdward/pyVBAharness)
-rates these practices on every change to main and weekly, and publishes
-the result the README badge shows. Some of its checks assume more than one
-maintainer, such as a second person approving every change, so a
-single-maintainer project cannot score full marks on them.
+## Releases
 
-Releases reach PyPI through Trusted Publishing, so no upload token exists
-to be stolen, and PyPI records an attestation tying each file to the
-workflow run that built it.
+Publishing a GitHub release starts the Publish workflow. On Windows it runs
+the unit tests, checks that the release tag matches the version in
+`pyproject.toml`, builds the wheel and sdist, checks their metadata, and
+installs the wheel in a clean environment to check that it imports. It runs
+Security and Malware scan on the release commit, and uploads to PyPI
+through trusted publishing only when the build and both scans pass, so no
+upload token exists to be stolen. Started by hand, it is a dry run that
+publishes nothing.
 
-## Verifying a download
+The reports are attached to the GitHub release as `security-report.md` and
+`malware-report.md` whether the scans passed or not, so a blocked release
+says what blocked it. A release that reached PyPI also carries the signed
+provenance bundle `pyvbaharness-<version>.sigstore.json`.
+
+### Verifying a download
 
 Every file on PyPI carries PyPI's own provenance, which names this
 repository's `publish.yml` as the publisher; the file's page on PyPI shows it.
@@ -144,3 +172,19 @@ The output names the commit and workflow run that built the file. The
 signed bundle is also attached to the GitHub release as
 `pyvbaharness-<version>.sigstore.json`, so the check works without asking
 GitHub for it: add `--bundle pyvbaharness-<version>.sigstore.json`.
+
+## Repository settings
+
+<!-- repo-standards:begin security-settings. Copied from WilliamSmithEdward/repo-standards, templates/security/settings-block.md. Change it there; the weekly rescan fails a copy that differs. -->
+- `main` accepts changes only through a pull request that passes
+  **CI passed**, **Security passed** and **Malware scan passed**. The
+  ruleset has no bypass, for the owner either, and refuses force-pushes and
+  deleting the branch.
+- A `v*` release tag cannot be moved or deleted once pushed, except by a
+  repository admin.
+- A workflow that uses an action not pinned to a full commit SHA fails to
+  run. Workflow tokens are read-only unless a job is granted more for
+  itself.
+- Secret scanning with push protection, Dependabot alerts and security
+  updates, and private vulnerability reporting are on.
+<!-- repo-standards:end -->
