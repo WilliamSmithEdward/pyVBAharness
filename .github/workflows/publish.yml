@@ -85,7 +85,7 @@ jobs:
           # it explicitly or the step fails after reporting success.
           exit 0
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: distributions
           path: dist/
@@ -118,7 +118,7 @@ jobs:
       id-token: write
       attestations: write # store the provenance attestation
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: distributions
           path: dist/
@@ -134,7 +134,7 @@ jobs:
       # The signed bundle goes on the GitHub release too, so a download can be
       # checked offline: gh attestation verify <file> --bundle <bundle>.
       - name: Keep the provenance bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: provenance
           path: ${{ steps.attest.outputs.bundle-path }}
@@ -158,22 +158,22 @@ jobs:
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: security-report
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: malware-report
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.DRY_RUN == 'true'
         with:
           name: distributions
           path: dist/
       - name: Keep what the release would carry
         if: env.DRY_RUN == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-preview
           path: |
@@ -183,7 +183,7 @@ jobs:
           if-no-files-found: error
       # The bundle exists only when PyPI was published: a blocked release
       # still gets its reports, and no bundle.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.DRY_RUN != 'true' && needs.publish.result == 'success'
         with:
           name: provenance
