@@ -5,4 +5,4 @@
 #
 # The rulesets it applies (p/python and the rest) are fetched from the
 # Semgrep registry on each run and are not pinned; the report names them.
-FROM semgrep/semgrep:1.178.0@sha256:32e459968daabe7ab86968184a29109b9564aa00392401156f9788452b42786b
+FROM semgrep/semgrep:1.181.0@sha256:81474464c1f07483ba0682a44787fd93c91397419762a04abe2bafaae396304b
