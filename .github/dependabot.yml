@@ -51,11 +51,10 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
-  # Scanner images, pinned by digest in one-line Dockerfiles.
+  # The ClamAV image, pinned by digest in a one-line Dockerfile.
   - package-ecosystem: docker
     directories:
       - /.github/security/clamav
-      - /.github/security/semgrep
     schedule:
       interval: weekly
     cooldown:

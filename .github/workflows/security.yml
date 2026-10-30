@@ -17,9 +17,9 @@ name: Security
 # change when the code does not.
 #
 # Pinning: actions by commit SHA with the version in a trailing comment;
-# runners by OS release and Python by exact version; Semgrep and ClamAV by
-# image digest (.github/security/*/Dockerfile); Python tools by hash
-# (.github/requirements/*.txt); YARA-X and its rules by release and
+# runners by OS release and Python by exact version; ClamAV by image
+# digest (.github/security/clamav/Dockerfile); Python tools, Semgrep
+# among them, by hash (.github/requirements/*.txt); YARA-X and its rules by release and
 # SHA-256 (.github/security/yara.json). Dependabot moves the actions, images
 # and tools, and update-yara-rules.yml moves the release downloads. Nothing
 # can follow runner labels or Python versions; move those by hand, as the
@@ -89,14 +89,25 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.14"
+
+      # Semgrep and its dependencies from .github/requirements/semgrep.txt,
+      # wheels only and hash-checked, in a venv outside the checkout so the
+      # scan does not read it.
+      - name: Install Semgrep
+        run: |
+          python -m venv "$RUNNER_TEMP/semgrep"
+          "$RUNNER_TEMP/semgrep/bin/python" -m pip install --quiet --require-hashes \
+            --only-binary :all: -r .github/requirements/semgrep.txt
+
       - name: Semgrep
         # --error fails the step on any finding. Parse warnings from the
         # PowerShell run blocks in the workflows are reported by Semgrep
         # but are not findings, and do not fail it.
         run: |
-          docker build --quiet --tag pyvba-semgrep .github/security/semgrep
-          docker run --rm --volume "$PWD:/src" --workdir /src pyvba-semgrep \
-            semgrep scan \
+          "$RUNNER_TEMP/semgrep/bin/semgrep" scan \
               --config p/python \
               --config p/security-audit \
               --config p/secrets \
