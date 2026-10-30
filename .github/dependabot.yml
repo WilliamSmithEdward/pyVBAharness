@@ -51,11 +51,12 @@ updates:
         patterns: ["*"]
         update-types: [minor, patch]
 
-  # Scanner images, pinned by digest in one-line Dockerfiles.
+  # The ClamAV image, pinned by digest in a one-line Dockerfile. GitHub
+  # refuses Dependabot's Semgrep image updates; update-semgrep-image.yml
+  # moves that one.
   - package-ecosystem: docker
     directories:
       - /.github/security/clamav
-      - /.github/security/semgrep
     schedule:
       interval: weekly
     cooldown:
