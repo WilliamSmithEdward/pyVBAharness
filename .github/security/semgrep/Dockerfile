@@ -1,5 +1,5 @@
-# Semgrep for .github/workflows/security.yml, pinned by digest; Dependabot
-# proposes version and digest bumps. Run from its image rather than pip,
+# Semgrep for .github/workflows/security.yml, pinned by digest;
+# update-semgrep-image.yml proposes version and digest bumps. Run from its image rather than pip,
 # because its dependency tree is large enough that a hash-locked install
 # would be most of the maintenance.
 #
