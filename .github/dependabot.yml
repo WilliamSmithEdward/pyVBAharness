@@ -1,9 +1,11 @@
 version: 2
 
 # Every pin in the repository that a tool can follow is followed from here.
-# The exception is a GitHub release download (YARA-X and its rules, pinned
+# The exceptions are a GitHub release download (YARA-X and its rules, pinned
 # in .github/security/yara.json), which .github/workflows/update-yara-rules.yml
-# follows instead.
+# follows instead, and the ClamAV and Semgrep images, which
+# .github/workflows/update-images.yml follows because GitHub refuses
+# Dependabot's image updates.
 #
 # A seven-day cooldown throughout: a release is adopted once it is a week old,
 # which is long enough for a bad or compromised one to be noticed and pulled.
@@ -48,20 +50,5 @@ updates:
       exclude: [pyopenvba, pyofficeeditor, pyprettyvba, vba-reference, pyvbaanalysis, pyvbaharness, xlide-mcp]
     groups:
       tools:
-        patterns: ["*"]
-        update-types: [minor, patch]
-
-  # The ClamAV image, pinned by digest in a one-line Dockerfile. GitHub
-  # refuses Dependabot's Semgrep image updates; update-semgrep-image.yml
-  # moves that one.
-  - package-ecosystem: docker
-    directories:
-      - /.github/security/clamav
-    schedule:
-      interval: weekly
-    cooldown:
-      default-days: 7
-    groups:
-      minor-and-patch:
         patterns: ["*"]
         update-types: [minor, patch]

@@ -1,5 +1,5 @@
 # ClamAV engine for the malware scan in .github/workflows/malware-scan.yml,
-# pinned by digest; Dependabot proposes version and digest bumps.
+# pinned by digest; update-images.yml proposes version and digest bumps.
 #
 # The same image every repository uses. Its bundled signatures are not used:
 # the scan mounts its own database directory over /var/lib/clamav, and
