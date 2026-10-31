@@ -132,15 +132,15 @@ Python versions are moved by hand. The test suite's own dependencies
 resolve from the ranges `pyproject.toml` declares, because the point of the
 test matrix is to show the package works with what a user would install.
 
-Dependabot proposes updates to the GitHub Actions, the ClamAV image, the
-package's dependencies in `pyproject.toml` and the lock files in
+Dependabot proposes updates to the GitHub Actions, the package's
+dependencies in `pyproject.toml` and the lock files in
 `.github/requirements` once a version is a week old, and at once for a
 security advisory. The Update YARA rules workflow proposes new YARA pins
-each week, and the Update Semgrep image workflow a new Semgrep image once
-it is a week old (GitHub refuses Dependabot's updates of that image). A
-minor or patch update, and the YARA pull request, merges itself once CI,
-Security and Malware scan pass; a third-party major version waits for
-review.
+each week. The Update images workflow proposes new ClamAV and Semgrep
+images once they are a week old, including a version rebuilt in place
+(GitHub refuses Dependabot's image updates). A minor or patch update, and
+the YARA and image pull requests, merge themselves once CI, Security and
+Malware scan pass; a third-party major version waits for review.
 
 ## Releases
 
